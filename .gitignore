@@ -1,0 +1,15 @@
+############################################################
+## Global gitignore. Try not to add too many things here! ##
+############################################################
+# This thing
+.DS_Store
+
+# This other thing
+MANIFEST
+
+# vscode Stuff
+.vscode/*
+
+# Virtual Environments
+.env
+.venv
