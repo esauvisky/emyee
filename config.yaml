@@ -5,9 +5,9 @@ bulbs:
     - ip: 192.168.1.51
       min_temp: 2700
       max_temp: 6000
-    # - ip: 192.168.1.52
-    #   min_temp: 2700
-    #   max_temp: 6000
-    # - ip: 192.168.1.53
-    #   min_temp: 2700
-    #   max_temp: 6000
+    - ip: 192.168.1.52
+      min_temp: 2700
+      max_temp: 6000
+    - ip: 192.168.1.53
+      min_temp: 2700
+      max_temp: 6000

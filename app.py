@@ -50,7 +50,7 @@ class Bulb(yeelight.Bulb):
 
     def set_brightness(self, brightness):
         super().set_brightness(brightness)
-        print('Brightness set to', brightness, 'percent')
+        print('Brightness set to', brightness, 'percent in bulb ', self._ip)
 
     def set_color_temp(self, color_temp):
         if color_temp >= self.max_temp:
@@ -67,7 +67,7 @@ class Bulb(yeelight.Bulb):
 
 Event = Union[EventSongChanged, EventAdjustStartTime, EventStop]
 
-Color = int
+Color = [int, int]
 
 # Event producer
 API_CURRENT_PLAYING = 'https://api.spotify.com/v1/me/player/currently-playing'
@@ -143,27 +143,24 @@ class DeviceBus:
         logging.exception('Connection closed', exc_info=exc)
 
 
-async def make_send_to_device() -> Callable[[Color]]:
+async def make_send_to_device(bulb: Bulb) -> Callable[[Color]]:
     loop = asyncio.get_event_loop()
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
     transport, _ = await loop.create_datagram_endpoint(DeviceBus, sock=sock)
 
-    async def send_to_device(color: Color) -> None:
-        global bulbs
-        for bulb in bulbs:
-            for key, value in previous[bulb._ip].items():
-                try:
-                    if key == 'color_temp' and value != color[0]:
-                        bulb.set_color_temp(color[0])
-                        previous[bulb._ip]['color_temp']=color[0]
-                    elif key == 'brightness'  and value != color[1]:
-                        bulb.set_brightness(color[1])
-                        previous[bulb._ip]['brightness']=color[1]
-                    await asyncio.sleep(CONTROLLER_TICK)
-                except:
-                    pass
+    def send_to_device(color: Color) -> None:
+        bulb.set_color_temp(color[0])
+        bulb.set_brightness(color[1])
+        # for key, value in previous[bulb._ip].items():
+        #     # try:
+        #     if key == 'color_temp' and value != color[0]:
+        #         previous[bulb._ip]['color_temp']=color[0]
+        #     elif key == 'brightness'  and value != color[1]:
+        #         previous[bulb._ip]['brightness']=color[1]
+            # except:
+            #     print(f'error on lamp {bulb._ip}')
 
     return send_to_device
 
@@ -216,9 +213,9 @@ def make_get_current_color(analysis: RawSpotifyResponse, leds: int) -> Callable[
         tempo_color = BASE_COLOR_MULTIPLIER * scale_tempo(section['tempo'])
         pitch_color = [BASE_COLOR_MULTIPLIER * p for p in segment['pitches']]
 
-        # loudness_brighness = ((100 - MIN_BRIGHTNESS) * scale_loudness(section['loudness'])) + MIN_BRIGHTNESS
-        loudness_brighness = ((100 - MIN_BRIGHTNESS) * scale_loudness(segment['loudness_start'])) + MIN_BRIGHTNESS
-        print(segment)
+        loudness_brighness = ((100 - MIN_BRIGHTNESS) * scale_loudness(section['loudness'])) + MIN_BRIGHTNESS
+        # loudness_brighness = ((100 - MIN_BRIGHTNESS) * scale_loudness(segment['loudness_start'])) + MIN_BRIGHTNESS
+        # print(segment)
         # color = (pitch_color[n // (leds // 12)] * loudness_brighness
         #           for n in range(leds))
 
@@ -246,7 +243,7 @@ def make_get_current_color(analysis: RawSpotifyResponse, leds: int) -> Callable[
 
 
 def get_empty_color(leds: int) -> Color:
-    return 2700
+    return [2700, MIN_BRIGHTNESS]
 
 
 # Events listener, device controller
@@ -278,14 +275,30 @@ async def _events_to_color(leds: int, events_queue: asyncio.Queue[Event]) -> Asy
             yield get_current_color(time.time() - start_time)
 
 
-async def lights_controller(device_ip: str,
-                            device_port: int,
+async def lights_controller(bulb,
                             leds: int,
                             events_queue: asyncio.Queue[Event]) -> NoReturn:
-    global bulbs
+    while True:
+        send_to_device = await make_send_to_device(bulb)
+        try:
+            async for color in _events_to_color(leds, events_queue):
+                send_to_device(color)
+        except Exception:
+            logging.exception("Something went wrong with lights_controller")
+            await asyncio.sleep(CONTROLLER_ERROR_DELAY)
+
+
+
+
+# Glue
+def main():
+    user_id = os.environ['USER_ID']
+    client_id = os.environ['CLIENT_ID']
+    client_secret = os.environ['CLIENT_SECRET']
+    leds = int(os.environ['LEDS'])
+
     with open('config.yaml', 'r') as config_file:
         config = load(config_file, Loader=Loader)
-        print('Initializing...')
         for bulb_config in config["bulbs"]:
             ip = bulb_config["ip"]
             min_temp = bulb_config.get("min_temp")
@@ -294,37 +307,19 @@ async def lights_controller(device_ip: str,
             bulb = Bulb(ip, min_temp, max_temp)
             try:
                 bulb.start_music()
-            except Exception as e:
+            except Exception as _:
                 print(f"Error when starting bulb {ip}")
             else:
                 print(f"Initializing Yeelight at {ip}")
                 bulbs.append(bulb)
                 previous[ip] = {'color_temp': 2700,
                             'brightness': MIN_BRIGHTNESS}
-
-    while True:
-        send_to_device = await make_send_to_device()
-        try:
-            async for color in _events_to_color(leds, events_queue):
-                await send_to_device(color)
-        except Exception:
-            logging.exception("Something went wrong with lights_controller")
-            await asyncio.sleep(CONTROLLER_ERROR_DELAY)
-
-# Glue
-def main():
-    device_ip = os.environ['DEVICE_IP']
-    device_port = int(os.environ['DEVICE_PORT'])
-    user_id = os.environ['USER_ID']
-    client_id = os.environ['CLIENT_ID']
-    client_secret = os.environ['CLIENT_SECRET']
-    leds = int(os.environ['LEDS'])
-
+    print(previous)
     events_queue = asyncio.Queue()
     loop = asyncio.get_event_loop()
     loop.run_until_complete(asyncio.gather(
         spotify_changes_listener(user_id, client_id, client_secret, events_queue),
-        lights_controller(device_ip, device_port, leds, events_queue),
+        *[lights_controller(bulb, leds, events_queue) for bulb in bulbs]
     ))
 
 
