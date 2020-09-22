@@ -15,6 +15,7 @@ import yeelight
 from bottle import run, post, request
 import traceback
 from yaml import load, Loader
+import math
 
 bulbs = []
 in_use = []
@@ -173,14 +174,14 @@ async def make_send_to_device() -> Callable[[Color]]:
                     # print(value)
                     # print(round(color[1]))
                     # print(stepped_brightness)
-                    if len(stepped_brightness) > 1 and bulb not in in_use:
+                    if len(stepped_brightness) >= 1 and bulb not in in_use:
                         stepped_brightness.remove(stepped_brightness[0])
                         print(stepped_brightness)
                         for brightness in stepped_brightness:
                             if not previous[bulb._ip]['brightness'] == brightness:
                                 in_use.append(bulb)
                                 bulb.set_brightness(brightness)
-                                await asyncio.sleep(CONTROLLER_TICK*1)
+                                await asyncio.sleep(CONTROLLER_TICK/5)
                                 in_use.remove(bulb)
                             previous[bulb._ip]['brightness']=stepped_brightness.pop()
                     elif bulb in in_use:
@@ -188,7 +189,7 @@ async def make_send_to_device() -> Callable[[Color]]:
                             # previous[bulb._
                             # ip]['brightness']=brightness
                         # await asyncio.sleep(CONTROLLER_TICK)
-                await asyncio.sleep(CONTROLLER_TICK)
+                await asyncio.sleep(CONTROLLER_TICK/10)
                 # await asyncio.sleep(CONTROLLER_TICK)
                 # except Exception as e:
                 #     print(e)
@@ -227,11 +228,11 @@ def make_get_current_color(analysis: RawSpotifyResponse, leds: int) -> Callable[
     get_current_section = make_get_current('sections')
     get_current_beat = make_get_current('beats')
 
-    def make_scale(name):
+    def make_scale(name, square=False):
         xs = [x[name] for x in analysis['sections']]
         min_xs = min(xs)
         max_xs = max(xs)
-        return lambda x: (x - min_xs - .2) / (max_xs - min_xs + .2)
+        return lambda x: (x - min_xs) / (max_xs - min_xs)
 
     scale_loudness = make_scale('loudness')
     scale_tempo = make_scale('tempo')
@@ -248,15 +249,15 @@ def make_get_current_color(analysis: RawSpotifyResponse, leds: int) -> Callable[
         # print(beat_brightness')
         loudness_brighness = ((MAX_BRIGHTNESS - MIN_BRIGHTNESS) * scale_loudness(segment['loudness_start']) - 5)
         # loudness_brighness = ((MAX_BRIGHTNESS - MIN_BRIGHTNESS) * scale_loudness(segment['loudness'])) + MIN_BRIGHTNESS
-        # loudness_brighness = max(round(loudness_brighness + (10 * scale_loudness(segment['loudness_start']) - 5), 0), 0)
-        loudness_brighness = max(round(loudness_brighness + (10 * scale_loudness(segment['loudness_start'] - segment['loudness_max']) / section['loudness'] - 5), 0), 0)
-        print(scale_loudness(section['loudness']))
-        loudness_brighness = max((round((loudness_brighness)*(scale_loudness(section['loudness'])*3))/4,0), 0)
+        loudness_brighness = max(round(loudness_brighness + (10 * scale_loudness(segment['loudness_start']) - 5), 0), 0)
+        # loudness_brighness = max(round(loudness_brighness + (10 * scale_loudness(segment['loudness_start'] - segment['loudness_max']) / section['loudness'] - 5), 0), 0)
+        print(loudness_brighness, scale_loudness(section['loudness']))
+        loudness_brighness = max(round(loudness_brighness * scale_loudness(section['loudness']),0), 0)
         # print()
         # loudness_brighness = max(round(beat_brightness + loudness_brighness, 0), 0)
         # print(segment)
         # color = (pitch_color[n // (leds // 12)] * loudness_brighness
-        #           for n in range(leds))
+        #           for n in range('leds))
 
         # if section['mode'] == 0:
         #     order = (0, 1, 2)
@@ -286,8 +287,8 @@ def get_empty_color(leds: int) -> Color:
 
 
 # Events listener, device controller
-CONTROLLER_TICK = 0.003
-CONTROLLER_ERROR_DELAY = 0.5
+CONTROLLER_TICK = 0.01
+CONTROLLER_ERROR_DELAY = 1
 
 
 async def _events_to_color(leds: int, events_queue: asyncio.Queue[Event]) -> AsyncIterable[Color]:
