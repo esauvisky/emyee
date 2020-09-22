@@ -17,6 +17,7 @@ import traceback
 from yaml import load, Loader
 
 bulbs = []
+in_use = []
 previous = {}
 
 # Shared communication
@@ -41,7 +42,7 @@ class EventStop:
 
 class Bulb(yeelight.Bulb):
 
-    def __init__(self, ip, min_temp=1700, max_temp=6500, effect="sudden", duration=5000):
+    def __init__(self, ip, min_temp=1700, effect="smooth", max_temp=6500, duration=50):
         self.min_temp = min_temp
         self.effect = effect
         self.duration = duration
@@ -144,26 +145,53 @@ class DeviceBus:
 
 
 async def make_send_to_device() -> Callable[[Color]]:
-    loop = asyncio.get_event_loop()
-    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
-    transport, _ = await loop.create_datagram_endpoint(DeviceBus, sock=sock)
+    # loop = asyncio.get_event_loop()
 
     async def send_to_device(color: Color) -> None:
         global bulbs
         for bulb in bulbs:
             for key, value in previous[bulb._ip].items():
-                try:
-                    if key == 'color_temp' and value != color[0]:
-                        bulb.set_color_temp(color[0])
-                        previous[bulb._ip]['color_temp']=color[0]
-                    elif key == 'brightness'  and value != color[1]:
-                        bulb.set_brightness(color[1])
-                        previous[bulb._ip]['brightness']=color[1]
-                    await asyncio.sleep(CONTROLLER_TICK)
-                except:
-                    pass
+                # try:
+                # if key == 'color_temp' and value != color[0]:
+                #     bulb.set_color_temp(color[0])
+                #     previous[bulb._ip]['color_temp']=color[0]
+                # elif key == 'brightness':
+                if key == 'brightness': #and round(value) != round(color[1]):
+                    # print(f"value {value}")
+                    # print(f"color ${color}")
+                    # bulb.set_brightness(color[1])
+                    try:
+                        step = round(((color[1] - value)/10))
+                        stepped_brightness = list(range(round(value), round(color[1]), step))
+                    except Exception as e:
+                        continue
+                    else:
+                        if not step or not stepped_brightness:
+                            continue
+#                    step = -1 if round(value) > round(color[1]) else 1
+                    #stepped_brightness = list(range(round(value), round(color[1]), step))
+                    # print(value)
+                    # print(round(color[1]))
+                    # print(stepped_brightness)
+                    if len(stepped_brightness) > 1 and bulb not in in_use:
+                        stepped_brightness.remove(stepped_brightness[0])
+                        print(stepped_brightness)
+                        for brightness in stepped_brightness:
+                            if not previous[bulb._ip]['brightness'] == brightness:
+                                in_use.append(bulb)
+                                bulb.set_brightness(brightness)
+                                await asyncio.sleep(CONTROLLER_TICK*1)
+                                in_use.remove(bulb)
+                            previous[bulb._ip]['brightness']=stepped_brightness.pop()
+                    elif bulb in in_use:
+                        print('bulb is in use')
+                            # previous[bulb._
+                            # ip]['brightness']=brightness
+                        # await asyncio.sleep(CONTROLLER_TICK)
+                await asyncio.sleep(CONTROLLER_TICK)
+                # await asyncio.sleep(CONTROLLER_TICK)
+                # except Exception as e:
+                #     print(e)
 
     return send_to_device
 
@@ -171,7 +199,8 @@ async def make_send_to_device() -> Callable[[Color]]:
 # Light collors selector, spooky, more details in the notebook
 SCALE = 500
 BASE_COLOR_MULTIPLIER = 2700
-MIN_BRIGHTNESS = 40
+MIN_BRIGHTNESS = 0
+MAX_BRIGHTNESS = 50
 
 
 def _normalize(pv: float) -> float:
@@ -194,7 +223,7 @@ def make_get_current_color(analysis: RawSpotifyResponse, leds: int) -> Callable[
         key_to_x = {x['start']: x for x in analysis[name]}
         return lambda t: key_to_x[keys[bisect_left(keys, t) - 1]]
 
-    get_current_segmnet = make_get_current('segments')
+    get_current_segment = make_get_current('segments')
     get_current_section = make_get_current('sections')
     get_current_beat = make_get_current('beats')
 
@@ -202,23 +231,30 @@ def make_get_current_color(analysis: RawSpotifyResponse, leds: int) -> Callable[
         xs = [x[name] for x in analysis['sections']]
         min_xs = min(xs)
         max_xs = max(xs)
-        return lambda x: (x - min_xs) / (max_xs - min_xs)
+        return lambda x: (x - min_xs - .2) / (max_xs - min_xs + .2)
 
     scale_loudness = make_scale('loudness')
     scale_tempo = make_scale('tempo')
 
     def get_current_color(t):
-        segment = get_current_segmnet(t)
+        segment = get_current_segment(t)
         section = get_current_section(t)
         beat = get_current_beat(t)
-
-        beat_color = BASE_COLOR_MULTIPLIER * (t - beat['start'] + beat['duration']) / beat['duration']
+        # print(section)''
+        beat_brightness = (t - beat['start'] + beat['duration']) / beat['duration']
         tempo_color = BASE_COLOR_MULTIPLIER * scale_tempo(section['tempo'])
         pitch_color = [BASE_COLOR_MULTIPLIER * p for p in segment['pitches']]
 
-        # loudness_brighness = ((100 - MIN_BRIGHTNESS) * scale_loudness(section['loudness'])) + MIN_BRIGHTNESS
-        loudness_brighness = ((100 - MIN_BRIGHTNESS) * scale_loudness(segment['loudness_start'])) + MIN_BRIGHTNESS
-        print(segment)
+        # print(beat_brightness')
+        loudness_brighness = ((MAX_BRIGHTNESS - MIN_BRIGHTNESS) * scale_loudness(segment['loudness_start']) - 5)
+        # loudness_brighness = ((MAX_BRIGHTNESS - MIN_BRIGHTNESS) * scale_loudness(segment['loudness'])) + MIN_BRIGHTNESS
+        # loudness_brighness = max(round(loudness_brighness + (10 * scale_loudness(segment['loudness_start']) - 5), 0), 0)
+        loudness_brighness = max(round(loudness_brighness + (10 * scale_loudness(segment['loudness_start'] - segment['loudness_max']) / section['loudness'] - 5), 0), 0)
+        print(scale_loudness(section['loudness']))
+        loudness_brighness = max((round((loudness_brighness)*(scale_loudness(section['loudness'])*3))/4,0), 0)
+        # print()
+        # loudness_brighness = max(round(beat_brightness + loudness_brighness, 0), 0)
+        # print(segment)
         # color = (pitch_color[n // (leds // 12)] * loudness_brighness
         #           for n in range(leds))
 
@@ -250,8 +286,8 @@ def get_empty_color(leds: int) -> Color:
 
 
 # Events listener, device controller
-CONTROLLER_TICK = 0.01
-CONTROLLER_ERROR_DELAY = 1
+CONTROLLER_TICK = 0.003
+CONTROLLER_ERROR_DELAY = 0.5
 
 
 async def _events_to_color(leds: int, events_queue: asyncio.Queue[Event]) -> AsyncIterable[Color]:
@@ -300,7 +336,8 @@ async def lights_controller(device_ip: str,
                 print(f"Initializing Yeelight at {ip}")
                 bulbs.append(bulb)
                 previous[ip] = {'color_temp': 2700,
-                            'brightness': MIN_BRIGHTNESS}
+                            'brightness': MIN_BRIGHTNESS,
+                            'in_use': False}
 
     while True:
         send_to_device = await make_send_to_device()
