@@ -1,2 +1,5 @@
 spotipy
 aiohttp
+yeelight
+bottle
+pyaml
