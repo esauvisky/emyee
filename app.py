@@ -287,7 +287,7 @@ def get_empty_color(leds: int) -> Color:
 
 
 # Events listener, device controller
-CONTROLLER_TICK = 0.01
+CONTROLLER_TICK = 0.1
 CONTROLLER_ERROR_DELAY = 1
 
 
