@@ -44,8 +44,7 @@ class EventStop:
 
 
 class Bulb(yeelight.Bulb):
-
-    def __init__(self, ip, min_temp=1700, effect="smooth", max_temp=6500, duration=50):
+    def __init__(self, ip, min_temp=1700, effect="smooth", max_temp=6500, duration=2000):
         self.min_temp = min_temp
         self.effect = effect
         self.duration = duration
@@ -150,70 +149,69 @@ class DeviceBus:
 async def make_send_to_device() -> Callable[[Color]]:
     # loop = asyncio.get_event_loop()
 
-    async def send_to_device(color: Color) -> None:
+    async def send_to_device(bulb: Bulb, color: Color) -> None:
         # print(bulb)
-        for bulb in bulbs:
-            for key, value in previous[bulb._ip].items():
-                if key == 'brightness': #and round(value) != round(color[1]):
-                    previous_value=previous[bulb._ip]['brightness']
-                    next_value=color[1]
-                    time_to_spend=color[0]
-                    # print(time_to_spend)
-                    # interval=0.1
-                    step_size = 0.2
-                    # print(step_size)
-                    if next_value < previous_value:
-                        step_size = 0 - step_size
+        for key, value in previous[bulb._ip].items():
+            if key == 'brightness': #and round(value) != round(color[1]):
+                previous_value=previous[bulb._ip]['brightness']
+                next_value=color[1]
+                # if abs(next_value - previous_value) <= 1:
+                #     continue
+                time_to_spend=color[0]
+                # print(time_to_spend)
+                # interval=0.1/
+                step_size = (next_value - previous_value) / 25
+                # print(step_size)
+                try:
                     stepped_brightness = np.arange(previous_value, next_value, step_size).tolist()
-                    number_of_steps = len(stepped_brightness)
-                    # print(previous_value, next_value)
-    #                 if abs(next_value - previous_value) <= 2:
-    #                     continue
+                    # stepped_brightness = [round(s,2) for s in stepped_brightness]
+                except:
+                    continue
 
-                    count = 0
-                    # while True:
-                    #     count += 1
-                    #     print(count)
-                    #     stepped_brightness = np.arange(previous_value, next_value, step_size).tolist()
-                    #     number_of_steps = len(stepped_brightness)
-                    #     try:
-                    #         interval = time_to_spend / number_of_steps
-                    #     except:
-                    #         pass
+                number_of_steps = len(stepped_brightness)
+                interval = time_to_spend / number_of_steps
+                print(previous_value, next_value)
+# /
+#                 if next_value < previous_value:
+#                     step_size = 0 - step_size
 
-                    #     if interval >= 0.1 and interval <= 1:
-                    #         print(f'using interval {interval} with step size {step_size} and {number_of_steps} steps')
-                    #     elif interval < 0.1 and not interval :
-                    #         step_size = step_size * 2
-                    #     elif interval > 1:
-                    #         step_size = step_size / 2
-
-                    #     if count > 50:
-                    #         break
-                    # if number_of_steps == 5:
-                    #     continue
-                    print(stepped_brightness)
-                    # stepped_brightness = np.linspace(previous_value, next_value, num=number_of_steps).tolist()
-                    # print(f'pre: {stepped_brightness}')
-                    # print(min(range(len(stepped_brightness)), key=lambda i: abs(stepped_brightness[i]-previous_value)))
-                    # stepped_brightness = stepped_brightness[min(range(len(stepped_brightness)), key=lambda i: abs(stepped_brightness[i]-previous_value)):]
-                    # print(f'pos {stepped_brightness}')
-                    if number_of_steps:
-                        # interval = time_to_spend / number_of_steps
-                        # print(interval)
-                        # print(f'number of steps: {len(stepped_brightness)}, interval: {interval}, total time: {time_to_spend}')
-                        print(f'number of steps: {number_of_steps}, interval: {interval}, total time: {time_to_spend}')
-                        for brightness in stepped_brightness:
-                            brightness = round(brightness, 2)
-                            if not previous[bulb._ip]['brightness'] == brightness:
-                                bulb.set_brightness(brightness)
-                                await asyncio.sleep(interval)
-                                # time.sleep(interval)
-                                # previous[bulb._ip]['brightness']=brightness
-                                previous[bulb._ip]['brightness']=stepped_brightness.pop()
-                        # await asyncio.sleep(0)
-                # except Exception as e:
-                #     print(e)
+                # count = 0
+                # while True:
+                #     count += 1
+                #     stepped_brightness = np.arange(previous_value, next_value, step_size).tolist()
+                #     number_of_steps = len(stepped_brightness)
+                #     interval = time_to_spend / number_of_steps
+                #     step_size = step_size / 2
+                #     if interval <= 0.1:
+                #         print(f'using interval {interval} with step size {step_size} and {number_of_steps} steps')
+                #         break
+                #     elif count == 50:
+                #         break
+                # if count == 50:
+                #     count = 0
+                #     continue
+                # if number_of_steps == 5:
+                #     continue
+                # print(stepped_brightness)
+                # stepped_brightness = np.linspace(previous_value, next_value, num=number_of_steps).tolist()
+                # print(f'pre: {stepped_brightness}')
+                # print(min(range(len(stepped_brightness)), key=lambda i: abs(stepped_brightness[i]-previous_value)))
+                # stepped_brightness = stepped_brightness[min(range(len(stepped_brightness)), key=lambda i: abs(stepped_brightness[i]-previous_value)):]
+                # print(f'pos {stepped_brightness}')
+                if number_of_steps:
+                    # print(f'number of steps: {len(stepped_brightness)}, interval: {interval}, total time: {time_to_spend}')
+                    # print(f'number of steps: {number_of_steps}, interval: {interval}, total time: {time_to_spend}')
+                    for brightness in stepped_brightness:
+                        if not previous[bulb._ip]['brightness'] == brightness:
+                            bulb.set_brightness(brightness)
+                            # time.sleep(interval)
+                            await asyncio.sleep(interval)
+                            # stepped_brightness.pop()
+                            # previous[bulb._ip]['brightness']=brightness
+                            previous[bulb._ip]['brightness']=stepped_brightness.pop()
+            # await asyncio.sleep(CONTROLLER_TICK)
+            # except Exception as e:
+            #     print(e)
 
     return send_to_device
 
@@ -221,8 +219,8 @@ async def make_send_to_device() -> Callable[[Color]]:
 # Light collors selector, spooky, more details in the notebook
 SCALE = 500
 BASE_COLOR_MULTIPLIER = 2700
-MIN_BRIGHTNESS = 1
-MAX_BRIGHTNESS = 50
+MIN_BRIGHTNESS = 0
+MAX_BRIGHTNESS = 100
 
 
 def _normalize(pv: float) -> float:
@@ -267,7 +265,6 @@ def make_get_current_color(analysis: RawSpotifyResponse, leds: int) -> Callable[
 
     scale_loudness = make_scale('loudness')
     scale_tempo = make_scale('tempo')
-    previous_final_fucking_big_segment = None
 
     def get_current_color(t):
         segment = get_current_segment(t)
@@ -279,26 +276,19 @@ def make_get_current_color(analysis: RawSpotifyResponse, leds: int) -> Callable[
             'final_frigging_loudness': segment['loudness_start']
         }
         n = 1
-        new_duration = 0
+        total_duration = 0
         numerador = segment['loudness_start'] * segment['duration']
-        while new_duration < 3:       # while duration is less than 3 seconds, keep bunching up segments
-            # try:
-            # except:
-            #     next_segment = get_next_n(t, n-1)
-
+        while final_fucking_big_segment['duration'] < 2     :       # while duration is less than 3 seconds, keep bunching up segments
             next_segment = get_next_n(t, n)
-            new_duration += final_fucking_big_segment['duration'] + next_segment['duration']
             print(f"duration: {next_segment['duration']}\t|| [Loudnessesesses] start: {next_segment['loudness_start']}\tmax: {next_segment['loudness_max']}\tmax_time: {next_segment['loudness_max_time']}")
+            final_fucking_big_segment['duration'] += next_segment['duration']
             numerador += next_segment['loudness_start'] * next_segment['duration']
             n += 1
+            if n > 50:
+                break
 
-
-        final_fucking_big_segment['duration'] = new_duration
-        final_fucking_big_segment['final_frigging_loudness'] = round(numerador / new_duration, 2)
-        # if previous_final_fucking_big_segment.index('final_frigging_loudness') and previous_final_fucking_big_segment['final_frigging_loudness'] == final_fucking_big_segment['final_frigging_loudness']:
-        #     return [final_fucking_big_segment['duration'], final_fucking_big_segment['final_frigging_loudness']
-
-        # print(final_fucking_big_segment)
+        final_fucking_big_segment['final_frigging_loudness'] = numerador / final_fucking_big_segment['duration']
+        print(final_fucking_big_segment)
         # print(f'minha fucking big segment é: ')
         # pprint(final_fucking_big_segment)
         # exit()
@@ -308,12 +298,13 @@ def make_get_current_color(analysis: RawSpotifyResponse, leds: int) -> Callable[
         # pitch_color = [BASE_COLOR_MULTIPLIER * p for p in segment['pitches']]
 
         # print(beat_brightness')
-        # loudness_brighness = ((MAX_BRIGHTNESS - MIN_BRIGHTNESS) * scale_loudness(segment['loudness_start']) - 5)
+        loudness_brighness = ((MAX_BRIGHTNESS - MIN_BRIGHTNESS) * scale_loudness(segment['loudness_start']) - 5)
         # loudness_brighness = max(loudness_brighness + (10 * scale_loudness(segment['loudness_start']) - 5),0) # very slow
-        # loudness_brighness = max(round(loudness_brighness + (10 * scale_loudness(segment['loudness_start'] - sfinal_fucking_big_segment[egment['loudness_max']) / section['loudness'] - 5), 0), 0) # very quick
+        loudness_brighness = max(round(loudness_brighness + scale_loudness(segment['loudness_start'] - segment['loudness_max']) / section['loudness'] - 5), 0)   # very quick
 
-        loudness_brighness = round(min(max(scale_loudness(final_fucking_big_segment['final_frigging_loudness']), 0) * 100, 100),2)
+        # loudness_brighness = min(max(scale_loudness(final_fucking_big_segment['final_frigging_loudness']), 0) * 50, 50)
         # loudness_brighness = max(round(loudness_brighness + 10 * scale_loudness(final_fucking_big_segment['final_frigging_loudness'] / section['loudness'] - 5), 0),0) # very quick
+
         # print(loudness_brighness, scale_loudness(section['loudness']))
         # loudness_brighness = max(round(loudness_brighness * scale_loudness(section['loudness']),0), 0)
         # print()
@@ -360,7 +351,7 @@ def get_empty_color(leds: int) -> Color:
 
 
 # Events listener, device controller
-CONTROLLER_TICK = 0.05
+CONTROLLER_TICK = 0.01
 CONTROLLER_ERROR_DELAY = 1
 
 
@@ -369,8 +360,7 @@ async def _events_to_color(leds: int, events_queue: asyncio.Queue[Event]) -> Asy
     start_time = 0
     event = EventStop()
     while True:
-        await asyncio.sleep(CONTROLLER_TICK)
-        # await asyncio.sleep(0)
+        # await asyncio.sleep(CONTROLLER_TICK)
 
         while not events_queue.empty():
             event = events_queue.get_nowait()
@@ -387,7 +377,6 @@ async def _events_to_color(leds: int, events_queue: asyncio.Queue[Event]) -> Asy
             yield get_empty_color(leds)
         else:
             retval = get_current_color(time.time() - start_time)
-            await asyncio.sleep(retval[0])
             yield retval
             await asyncio.sleep(0)
 
@@ -400,7 +389,8 @@ async def lights_controller(bulbs,
         send_to_device = await make_send_to_device()
         try:
             async for color in _events_to_color(leds, events_queue):
-                await send_to_device(color)
+                for bulb in bulbs:
+                    await send_to_device(bulb, color)
         except Exception:
             logging.exception("Something went wrong with lights_controller")
             await asyncio.sleep(CONTROLLER_ERROR_DELAY)
