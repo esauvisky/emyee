@@ -162,7 +162,7 @@ async def make_send_to_device() -> Callable[[Color]]:
                     # print(f"color ${color}")
                     # bulb.set_brightness(color[1])
                     try:
-                        step = round(((color[1] - value)/10))
+                        step = round(((color[1] - value)/5))
                         stepped_brightness = list(range(round(value), round(color[1]), step))
                     except Exception as e:
                         continue
@@ -176,12 +176,12 @@ async def make_send_to_device() -> Callable[[Color]]:
                     # print(stepped_brightness)
                     if len(stepped_brightness) >= 1 and bulb not in in_use:
                         stepped_brightness.remove(stepped_brightness[0])
-                        print(stepped_brightness)
+                        # print(stepped_brightness)
                         for brightness in stepped_brightness:
                             if not previous[bulb._ip]['brightness'] == brightness:
                                 in_use.append(bulb)
                                 bulb.set_brightness(brightness)
-                                await asyncio.sleep(CONTROLLER_TICK/5)
+                                await asyncio.sleep(step/len(stepped_brightness))
                                 in_use.remove(bulb)
                             previous[bulb._ip]['brightness']=stepped_brightness.pop()
                     elif bulb in in_use:
@@ -200,8 +200,8 @@ async def make_send_to_device() -> Callable[[Color]]:
 # Light collors selector, spooky, more details in the notebook
 SCALE = 500
 BASE_COLOR_MULTIPLIER = 2700
-MIN_BRIGHTNESS = 0
-MAX_BRIGHTNESS = 50
+MIN_BRIGHTNESS = 10
+MAX_BRIGHTNESS = 80
 
 
 def _normalize(pv: float) -> float:
@@ -251,7 +251,7 @@ def make_get_current_color(analysis: RawSpotifyResponse, leds: int) -> Callable[
         # loudness_brighness = ((MAX_BRIGHTNESS - MIN_BRIGHTNESS) * scale_loudness(segment['loudness'])) + MIN_BRIGHTNESS
         loudness_brighness = max(round(loudness_brighness + (10 * scale_loudness(segment['loudness_start']) - 5), 0), 0)
         # loudness_brighness = max(round(loudness_brighness + (10 * scale_loudness(segment['loudness_start'] - segment['loudness_max']) / section['loudness'] - 5), 0), 0)
-        print(loudness_brighness, scale_loudness(section['loudness']))
+        # print(loudness_brighness, scale_loudness(section['loudness']))
         loudness_brighness = max(round(loudness_brighness * scale_loudness(section['loudness']),0), 0)
         # print()
         # loudness_brighness = max(round(beat_brightness + loudness_brighness, 0), 0)
