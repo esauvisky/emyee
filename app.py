@@ -1,7 +1,9 @@
+#!/usr/bin/env python3
 from __future__ import annotations
 
 import array
 import asyncio
+import dotenv
 from bisect import bisect_left
 from dataclasses import dataclass
 import logging
@@ -12,6 +14,36 @@ from typing import Union, Dict, Any, NoReturn, AsyncIterable, List, Tuple, Calla
 import aiohttp
 from spotipy.util import prompt_for_user_token
 import yeelight
+
+from loguru import logger
+import time
+import sys
+
+def timeit(func):
+    """
+    Decorator to time and report elapsed time of functions
+    """
+    def wrapped(*args, **kwargs):
+        start = time.time()
+        result = func(*args, **kwargs)
+        end = time.time()
+        logger.debug("Function '{}' executed in {:f} s", func.__name__, end - start)
+        return result
+    return wrapped
+
+@timeit
+def setup_logging(level = "DEBUG", show_module = False):
+    """
+    Setups better log format for loguru
+    """
+    logger.remove(0)  # Remove the default logger
+    log_level = level
+    log_fmt = "<green>["
+    log_fmt += "{file:10.10}…:{line:<3} | " if show_module else ""
+    log_fmt += "{time:HH:mm:ss.SSS}]</green> <level>{level: <8}</level> | <level>{message}</level>"
+    logger.add(sys.stderr, level=log_level, format=log_fmt, colorize=True, backtrace=True, diagnose=True)
+
+setup_logging("DEBUG")
 
 # Shared communication
 RawSpotifyResponse = Dict[str, Any]
@@ -111,17 +143,16 @@ class DeviceBus:
         logging.exception('Connection closed', exc_info=exc)
 
 
-async def make_send_to_device(ip: str, port: int) -> Callable[[Colors]]:
-    loop = asyncio.get_event_loop()
-    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
-    transport, _ = await loop.create_datagram_endpoint(DeviceBus, sock=sock)
-
+async def make_send_to_device(device) -> Callable[[Colors]]:
     def send_to_device(colors: Colors) -> None:
-        line = array.array('B', [channel for color in colors
-                                 for channel in color])
-        transport.sendto(line.tobytes(), (ip, port))
+        if device.bulb_type.name == "WhiteTemp":
+            color = colors
+            logger.debug(f"Setting {device._ip} brightness to {color}...")
+            device.set_brightness((colors[0] + colors[1] + colors[2]) / 3)
+        else:
+            color = _scale_pixel(colors)
+            logger.debug(f"Setting {device._ip} color to {(color[0], color[1], color[2])}...")
+            device.set_rgb(color[0], color[1], color[2])
 
     return send_to_device
 
@@ -146,7 +177,7 @@ _scale_pixel = lambda p: (int(_normalize(p[0]) * SCALE[0] / 255),
                           int(_normalize(p[2]) * SCALE[2] / 255))
 
 
-def make_get_current_colors(analysis: RawSpotifyResponse, leds: int) -> Callable[[float], Colors]:
+def make_get_current_colors(analysis: RawSpotifyResponse) -> Callable[[float], Colors]:
     def make_get_current(name):
         keys = [x['start'] for x in analysis[name]]
         key_to_x = {x['start']: x for x in analysis[name]}
@@ -172,32 +203,23 @@ def make_get_current_colors(analysis: RawSpotifyResponse, leds: int) -> Callable
 
         beat_color = BASE_COLOR_MULTIPLIER * (t - beat['start'] + beat['duration']) / beat['duration']
         tempo_color = BASE_COLOR_MULTIPLIER * scale_tempo(section['tempo'])
-        pitch_colors = [BASE_COLOR_MULTIPLIER * p for p in segment['pitches']]
+        # pitch_colors = [BASE_COLOR_MULTIPLIER * p for p in segment['pitches']]
 
         loudness_multiplier = 1 + LOUDNESS_MULTIPLIER * scale_loudness(section['loudness'])
 
-        colors = ((beat_color * loudness_multiplier,
-                   tempo_color * loudness_multiplier,
-                   pitch_colors[n // (leds // 12)] * loudness_multiplier)
-                  for n in range(leds))
+        # colors = ((beat_color * loudness_multiplier,
+        #            tempo_color * loudness_multiplier,
+        #            pitch_colors[n // (leds // 12)] * loudness_multiplier)
+        #           for n in range(leds))
 
-        if section['mode'] == 0:
-            order = (0, 1, 2)
-        elif section['mode'] == 1:
-            order = (1, 2, 0)
-        else:
-            order = (2, 0, 1)
-
-        ordered_colors = ((color[order[0]], color[order[1]], color[order[2]])
-                          for color in colors)
-
-        return [_scale_pixel(color) for color in ordered_colors]
+        color = beat_color * loudness_multiplier
+        return color
 
     return get_current_colors
 
 
-def get_empty_colors(leds: int) -> Colors:
-    return [(0,) * 3] * leds
+def get_empty_colors() -> Colors:
+    return (0,0,0)
 
 
 # Events listener, device controller
@@ -205,7 +227,7 @@ CONTROLLER_TICK = 0.01
 CONTROLLER_ERROR_DELAY = 1
 
 
-async def _events_to_colors(leds: int, events_queue: asyncio.Queue[Event]) -> AsyncIterable[Colors]:
+async def _events_to_colors(events_queue: asyncio.Queue[Event]) -> AsyncIterable[Colors]:
     get_current_colors = None
     start_time = 0
     event = EventStop()
@@ -217,26 +239,24 @@ async def _events_to_colors(leds: int, events_queue: asyncio.Queue[Event]) -> As
 
         if isinstance(event, EventSongChanged):
             start_time = event.start_time
-            get_current_colors = make_get_current_colors(event.analysis, leds)
+            get_current_colors = make_get_current_colors(event.analysis)
         elif isinstance(event, EventAdjustStartTime):
             start_time = event.start_time
         elif isinstance(event, EventStop):
             get_current_colors = None
 
         if get_current_colors is None:
-            yield get_empty_colors(leds)
+            yield get_empty_colors()
         else:
             yield get_current_colors(time.time() - start_time)
 
 
-async def lights_controller(device_ip: str,
-                            device_port: int,
-                            leds: int,
+async def lights_controller(device: yeelight.Bulb,
                             events_queue: asyncio.Queue[Event]) -> NoReturn:
     while True:
-        send_to_device = await make_send_to_device(device_ip, device_port)
+        send_to_device = await make_send_to_device(device)
         try:
-            async for colors in _events_to_colors(leds, events_queue):
+            async for colors in _events_to_colors(events_queue):
                 send_to_device(colors)
 
         except Exception:
@@ -246,20 +266,35 @@ async def lights_controller(device_ip: str,
 
 # Glue
 def main():
-    device_ip = os.environ['DEVICE_IP']
-    device_port = int(os.environ['DEVICE_PORT'])
+    dotenv.load_dotenv(".env")
     user_id = os.environ['USER_ID']
     client_id = os.environ['CLIENT_ID']
     client_secret = os.environ['CLIENT_SECRET']
-    leds = int(os.environ['LEDS'])
+
+    logger.info("Discovering bulbs...")
+    devices = yeelight.discover_bulbs(5)
+    logger.info(f"Found {len(devices)} bulbs in the network.")
+    bulbs = [yeelight.Bulb(device["ip"], device["port"], effect="sudden", auto_on=True) for device in devices]
+    for bulb in bulbs:
+        logger.info(f"Setting music mode to {bulb._ip}")
+        try:
+            bulb.stop_music()
+        except:
+            pass
+        finally:
+            bulb.start_music()
 
     events_queue = asyncio.Queue()
+    controllers = [lights_controller(bulb, events_queue) for bulb in bulbs]
+
     loop = asyncio.get_event_loop()
     loop.run_until_complete(asyncio.gather(
         spotify_changes_listener(user_id, client_id, client_secret, events_queue),
-        lights_controller(device_ip, device_port, leds, events_queue),
+        *controllers
     ))
 
 
 if __name__ == '__main__':
+    # asyncio.run(main())
     main()
+
