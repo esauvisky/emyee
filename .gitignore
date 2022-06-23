@@ -13,3 +13,4 @@ MANIFEST
 # Virtual Environments
 .env
 .venv
+.cache-*

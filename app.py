@@ -192,7 +192,7 @@ async def make_send_to_device() -> Callable[[Color]]:
                 # stepped_brightness = np.linspace(previous_value, next_value, num=number_of_steps).tolist()
                 # print(f'pre: {stepped_brightness}')
                 # print(min(range(len(stepped_brightness)), key=lambda i: abs(stepped_brightness[i]-previous_value)))
-                # stepped_brightness = stepped_brightness[min(range(len(stepped_brightness)), key=lambda i: abs(stepped_brightness[i]-previous_value)):]
+                stepped_brightness = stepped_brightness[min(range(len(stepped_brightness)), key=lambda i: abs(stepped_brightness[i]-previous_value)):]
                 # print(f'pos {stepped_brightness}')
                 if number_of_steps:
                     # print(f'number of steps: {len(stepped_brightness)}, interval: {interval}, total time: {time_to_spend}')
@@ -214,8 +214,8 @@ async def make_send_to_device() -> Callable[[Color]]:
 # Light collors selector, spooky, more details in the notebook
 SCALE = 500
 BASE_COLOR_MULTIPLIER = 2700
-MIN_BRIGHTNESS = 0
-MAX_BRIGHTNESS = 60
+MIN_BRIGHTNESS = 20
+MAX_BRIGHTNESS = 100
 
 
 def _normalize(pv: float) -> float:
