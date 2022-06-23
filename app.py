@@ -124,7 +124,7 @@ async def spotify_changes_listener(user_id: str,
         async with aiohttp.ClientSession(headers=headers) as session:
             try:
                 async for event in _listen_to_spotify_changes(session):
-                    await events_queue.put(event)
+                    await events_queue.put_nowait(event)
             except Exception:
                 logging.exception('Something went wrong with spotify_changes_listener')
 
@@ -146,13 +146,11 @@ class DeviceBus:
 async def make_send_to_device(device) -> Callable[[Colors]]:
     def send_to_device(colors: Colors) -> None:
         if device.bulb_type.name == "WhiteTemp":
-            color = colors
-            logger.debug(f"Setting {device._ip} brightness to {color}...")
-            device.set_brightness((colors[0] + colors[1] + colors[2]) / 3)
+            logger.debug(f"Setting {device._ip} brightness to {((colors[0][0] + colors[0][1] + colors[0][2]) / 3)}...")
+            device.set_brightness((colors[0][0] + colors[0][1] + colors[0][2]) / 3)
         else:
-            color = _scale_pixel(colors)
-            logger.debug(f"Setting {device._ip} color to {(color[0], color[1], color[2])}...")
-            device.set_rgb(color[0], color[1], color[2])
+            logger.debug(f"Setting {device._ip} color to {(colors[0][0], colors[0][1], colors[0][2])}...")
+            device.set_rgb(colors[0][0], colors[0][1], colors[0][2])
 
     return send_to_device
 
@@ -177,7 +175,7 @@ _scale_pixel = lambda p: (int(_normalize(p[0]) * SCALE[0] / 255),
                           int(_normalize(p[2]) * SCALE[2] / 255))
 
 
-def make_get_current_colors(analysis: RawSpotifyResponse) -> Callable[[float], Colors]:
+def make_get_current_colors(analysis: RawSpotifyResponse, leds: int) -> Callable[[float], Colors]:
     def make_get_current(name):
         keys = [x['start'] for x in analysis[name]]
         key_to_x = {x['start']: x for x in analysis[name]}
@@ -203,23 +201,32 @@ def make_get_current_colors(analysis: RawSpotifyResponse) -> Callable[[float], C
 
         beat_color = BASE_COLOR_MULTIPLIER * (t - beat['start'] + beat['duration']) / beat['duration']
         tempo_color = BASE_COLOR_MULTIPLIER * scale_tempo(section['tempo'])
-        # pitch_colors = [BASE_COLOR_MULTIPLIER * p for p in segment['pitches']]
+        pitch_colors = [BASE_COLOR_MULTIPLIER * p for p in segment['pitches']]
 
         loudness_multiplier = 1 + LOUDNESS_MULTIPLIER * scale_loudness(section['loudness'])
 
-        # colors = ((beat_color * loudness_multiplier,
-        #            tempo_color * loudness_multiplier,
-        #            pitch_colors[n // (leds // 12)] * loudness_multiplier)
-        #           for n in range(leds))
+        colors = ((beat_color * loudness_multiplier,
+                   tempo_color * loudness_multiplier,
+                   pitch_colors[n // (leds // 12)] * loudness_multiplier)
+                  for n in range(leds))
 
-        color = beat_color * loudness_multiplier
-        return color
+        if section['mode'] == 0:
+            order = (0, 1, 2)
+        elif section['mode'] == 1:
+            order = (1, 2, 0)
+        else:
+            order = (2, 0, 1)
+
+        ordered_colors = ((color[order[0]], color[order[1]], color[order[2]])
+                          for color in colors)
+
+        return [_scale_pixel(color) for color in ordered_colors]
 
     return get_current_colors
 
 
-def get_empty_colors() -> Colors:
-    return (0,0,0)
+def get_empty_colors(leds: int) -> Colors:
+    return [(0,) * 3] * leds
 
 
 # Events listener, device controller
@@ -227,7 +234,7 @@ CONTROLLER_TICK = 0.01
 CONTROLLER_ERROR_DELAY = 1
 
 
-async def _events_to_colors(events_queue: asyncio.Queue[Event]) -> AsyncIterable[Colors]:
+async def _events_to_colors(leds: int, events_queue: asyncio.Queue[Event]) -> AsyncIterable[Colors]:
     get_current_colors = None
     start_time = 0
     event = EventStop()
@@ -239,29 +246,30 @@ async def _events_to_colors(events_queue: asyncio.Queue[Event]) -> AsyncIterable
 
         if isinstance(event, EventSongChanged):
             start_time = event.start_time
-            get_current_colors = make_get_current_colors(event.analysis)
+            get_current_colors = make_get_current_colors(event.analysis, leds)
         elif isinstance(event, EventAdjustStartTime):
             start_time = event.start_time
         elif isinstance(event, EventStop):
             get_current_colors = None
 
         if get_current_colors is None:
-            yield get_empty_colors()
+            yield get_empty_colors(leds)
         else:
             yield get_current_colors(time.time() - start_time)
 
 
-async def lights_controller(device: yeelight.Bulb,
+async def lights_controller(devices: List[yeelight.Bulb],
+                            leds: int,
                             events_queue: asyncio.Queue[Event]) -> NoReturn:
     while True:
-        send_to_device = await make_send_to_device(device)
-        try:
-            async for colors in _events_to_colors(events_queue):
-                send_to_device(colors)
-
-        except Exception:
-            logging.exception("Something went wrong with lights_controller")
-            await asyncio.sleep(CONTROLLER_ERROR_DELAY)
+            try:
+                async for colors in _events_to_colors(leds, events_queue):
+                    for device in devices:
+                        send_to_device = await make_send_to_device(device)
+                        send_to_device(colors)
+            except Exception:
+                logging.exception("Something went wrong with lights_controller")
+                await asyncio.sleep(CONTROLLER_ERROR_DELAY)
 
 
 # Glue
@@ -270,6 +278,7 @@ def main():
     user_id = os.environ['USER_ID']
     client_id = os.environ['CLIENT_ID']
     client_secret = os.environ['CLIENT_SECRET']
+    leds = int(os.environ['LEDS'])
 
     logger.info("Discovering bulbs...")
     devices = yeelight.discover_bulbs(5)
@@ -285,12 +294,11 @@ def main():
             bulb.start_music()
 
     events_queue = asyncio.Queue()
-    controllers = [lights_controller(bulb, events_queue) for bulb in bulbs]
 
     loop = asyncio.get_event_loop()
     loop.run_until_complete(asyncio.gather(
         spotify_changes_listener(user_id, client_id, client_secret, events_queue),
-        *controllers
+        lights_controller(bulbs, leds, events_queue)
     ))
 
 
