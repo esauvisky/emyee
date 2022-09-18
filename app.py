@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import array
 import asyncio
+import math
 import dotenv
 from bisect import bisect_left
 from dataclasses import dataclass
@@ -149,7 +150,7 @@ async def send_to_device(device, brightness: int, duration: int) -> None:
         # brightness = int((color[0] + color[1] + color[2]) / 3)
         # if device.last_properties["bright"] != brightness:
         logger.debug(f"Setting {device._ip} to {brightness} for {int(duration * 1000)}ms...")
-        device.duration = int(duration * 1000 + 200)
+        # device.duration = int(duration * 1000)
         # device.stop_flow()
         device.set_brightness(brightness)
         # else:
@@ -161,6 +162,9 @@ async def send_to_device(device, brightness: int, duration: int) -> None:
 SCALE = (100, 100, 100)
 BASE_COLOR_MULTIPLIER = 60
 LOUDNESS_MULTIPLIER = 3
+
+MIN_BRIGHTNESS=0
+MAX_BRIGHTNESS=15
 
 
 def _normalize(pv: float) -> float:
@@ -204,52 +208,67 @@ def make_get_current_colors(analysis: RawSpotifyResponse, leds: int) -> Callable
         max_xs = max(xs)
         return lambda x: (x-min_xs) / (max_xs-min_xs)
     def make_section_scale(name):
-        xs = [x[name] for x in analysis['segments']]
+        xs = [(10 * x[name]/10) for x in analysis['segments']]
         min_xs = min(xs)
         max_xs = max(xs)
         return lambda x: (x-min_xs) / (max_xs-min_xs)
 
-    scale_loudness = make_scale('loudness')
-    scale_tempo = make_scale('tempo')
+    # scale_loudness = make_scale('loudness')
+    # scale_tempo = make_scale('tempo')
+    scale_loudness_max = make_section_scale('loudness_max')
     scale_loudness_start = make_section_scale('loudness_start')
 
     def get_current_colors(t):
         segment = get_current_segment(t)
-        section = get_current_section(t)
-        beat = get_current_beat(t)
-        final_fucking_big_segment = {
+        scale_max = scale_loudness_start(segment["loudness_max"])
+        scale_start = scale_loudness_start(segment["loudness_start"])
+        duration = segment['duration']
+        brightness = float(MIN_BRIGHTNESS + math.log((MAX_BRIGHTNESS - MIN_BRIGHTNESS) * (scale_max - scale_start), 2) ** 2)
+        return brightness, duration # works and simple
+
+        # section = get_current_section(t)
+        # beat = get_current_beat(t)
+        combined_segment = {
             'start': segment['start'],
             'duration': segment['duration'],
-            'final_frigging_loudness': segment['loudness_start']
+            'final_loudness_max': segment['loudness_max'],
+            'final_loudness_start': segment['loudness_start']
         }
         n = 1
-        total_duration = 0
-        numerador = segment['loudness_start'] * segment['duration']
-        while final_fucking_big_segment['duration'] < 0.2:       # while duration is less than .5 seconds, keep bunching up segments
+        total_duration = segment['duration']
+        loudness_max_counter = segment['loudness_max']
+        loudness_start_counter = segment['loudness_start']
+        while combined_segment['duration'] < 0.3:       # while duration is less than .5 seconds, keep bunching up segments
             next_segment = get_next_n(t, n)
-            print(f"duration: {next_segment['duration']}\t|| [Loudnessesesses] start: {next_segment['loudness_start']}\tmax: {next_segment['loudness_max']}\tmax_time: {next_segment['loudness_max_time']}")
-            final_fucking_big_segment['duration'] += next_segment['duration']
-            numerador += next_segment['loudness_start'] * next_segment['duration']
+            print(f"duration: {next_segment['duration']}\t|| [Loudnessesesses] start: {next_segment['start']}\tmax: {next_segment['loudness_max']}\tmax_time: {next_segment['loudness_max_time']}")
+            combined_segment['duration'] += next_segment['duration']
+            loudness_max_counter += next_segment['loudness_max'] * next_segment['duration']
+            loudness_start_counter += next_segment['loudness_start'] * next_segment['duration']
             n += 1
             if n > 50:
                 break
 
-        final_fucking_big_segment['final_frigging_loudness'] = numerador / final_fucking_big_segment['duration']
+        combined_segment['final_loudness_max'] = loudness_max_counter / combined_segment['duration']
+        combined_segment['final_loudness_start'] = loudness_start_counter / combined_segment['duration']
+
+        # duration = segment['duration']
+        brightness = float(MIN_BRIGHTNESS + (MAX_BRIGHTNESS - MIN_BRIGHTNESS) * math.log(combined_segment['final_loudness_max'] - combined_segment['final_loudness_start']) / n)
         # print(str(1/(float(10.0) ** float((numerador/10)))))
-        print(str(scale_loudness_start(segment["loudness_start"])))
         # print(f'minha fucking big segment é: ')
         # pprint(final_fucking_big_segment)
         # beat_brightness = (t - beat['start'] + beat['duration']) / beat['duration']
         # tempo_color = BASE_COLOR_MULTIPLIER * scale_tempo(section['tempo'])
         # pitch_color = [BASE_COLOR_MULTIPLIER * p for p in segment['pitches']]
 
-        # print(beat_brightness')
-        loudness_brighness = ((10) * scale_loudness(segment['loudness_start']))
-        loudness_brighness = max(loudness_brighness + (10 * scale_loudness(segment['loudness_start']) - 5),0) # very slow
-        # loudness_brighness = max(round(loudness_brighness + (10 * scale_loudness(segment['loudness_start'] - sfinal_fucking_big_segment[egment['loudness_max']) / section['loudness'] - 5), 0), 0) # very quick
+        # print(final_fucking_big_segment['final_frigging_loudness'])
+        # scale = (scale_loudness_start(final_fucking_big_segment['final_frigging_loudness']))
+        # brightness = float(MIN_BRIGHTNESS + math.log((MAX_BRIGHTNESS - MIN_BRIGHTNESS) * scale ** 5, 5)) * 5
+        # # loudness_brighness = max(loudness_brighness + (10 * scale_loudness(segment['loudness_start']) - 5),0) # very slow
+        # # loudness_brighness = max(round(loudness_brighness + (10 * scale_loudness(segment['loudness_start'] - sfinal_fucking_big_segment[egment['loudness_max']) / section['loudness'] - 5), 0), 0) # very quick
 
-        # loudness_brighness = min(max(scale_loudness(final_fucking_big_segment['final_frigging_loudness']), 0) * 100, 100)
-        return loudness_brighness, final_fucking_big_segment['duration']
+        print(brightness, duration)
+        # # loudness_brighness = min(max(scale_loudness(final_fucking_big_segment['final_frigging_loudness']), 0) * 100, 100)
+        return brightness, combined_segment['duration']
 
     # # original
     # def get_current_colors(t):
@@ -288,7 +307,7 @@ def get_empty_colors(leds: int) -> Colors:
 
 
 # Events listener, device controller
-CONTROLLER_TICK = 0.01
+CONTROLLER_TICK = 0.005
 CONTROLLER_ERROR_DELAY = 1
 
 
@@ -335,7 +354,7 @@ async def lights_controller(devices: List[yeelight.Bulb], leds: int, events_queu
         except Exception:
             logging.exception("Something went wrong with lights_controller")
             await asyncio.sleep(CONTROLLER_ERROR_DELAY)
-        await asyncio.sleep(CONTROLLER_TICK)
+        # await asyncio.sleep(CONTROLLER_TICK)
 
 
 # Glue
@@ -356,6 +375,7 @@ def main():
         logger.info(f"Setting music mode to {bulb._ip}")
         try:
             bulb.start_music()
+            bulb.duration = 1000
         except:
             pass
 
