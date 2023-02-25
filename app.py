@@ -20,6 +20,11 @@ from loguru import logger
 import time
 import sys
 
+# Events listener, device controller
+CONTROLLER_TICK = 0.01
+CONTROLLER_ERROR_DELAY = 1
+
+
 def setup_logging(level="DEBUG", show_module=False):
     """
     Setups better log format for loguru
@@ -126,54 +131,8 @@ class DeviceBus:
 async def send_to_device(device, brightness: int, duration: int) -> None:
     logger.trace(f"Setting {device._ip} to {brightness} for {int(duration * 1000)}ms...")
     # device.stop_flow()
-    device.duration = int(duration * 1000)
-        device.set_brightness(brightness)
-        device.set_brightness(brightness)
-        device.set_brightness(brightness)
-        # else:
-        #     logger.debug(f"Setting {device._ip} color to {(brightness[0][0], brightness[0][1], brightness[0][2])}...")
-        #     device.set_rgb(brightness[0][0], brightness[0][1], brightness[0][2])
-
-
-# Light collors selector, spooky, more details in the notebook
-SCALE = (100, 100, 100)
-BASE_COLOR_MULTIPLIER = 40
-LOUDNESS_MULTIPLIER = 3
-
+    device.duration = int(duration * 1000 - CONTROLLER_TICK * 1000)
     device.set_brightness(brightness)
-        # else:
-        #     logger.debug(f"Setting {device._ip} color to {(brightness[0][0], brightness[0][1], brightness[0][2])}...")
-        #     device.set_rgb(brightness[0][0], brightness[0][1], brightness[0][2])
-
-
-# Light collors selector, spooky, more details in the notebook
-SCALE = (100, 100, 100)
-BASE_COLOR_MULTIPLIER = 40
-LOUDNESS_MULTIPLIER = 3
-
-    device.set_brightness(brightness)
-        device.set_brightness(brightness)
-        # else:
-        #     logger.debug(f"Setting {device._ip} color to {(brightness[0][0], brightness[0][1], brightness[0][2])}...")
-        #     device.set_rgb(brightness[0][0], brightness[0][1], brightness[0][2])
-
-
-# Light collors selector, spooky, more details in the notebook
-SCALE = (100, 100, 100)
-BASE_COLOR_MULTIPLIER = 40
-LOUDNESS_MULTIPLIER = 3
-
-    device.set_brightness(brightness)
-        # else:
-        #     logger.debug(f"Setting {device._ip} color to {(brightness[0][0], brightness[0][1], brightness[0][2])}...")
-        #     device.set_rgb(brightness[0][0], brightness[0][1], brightness[0][2])
-
-
-# Light collors selector, spooky, more details in the notebook
-SCALE = (100, 100, 100)
-BASE_COLOR_MULTIPLIER = 40
-LOUDNESS_MULTIPLIER = 3
-
 
 def _normalize(pv: float) -> float:
     if pv < 0:
@@ -240,24 +199,20 @@ def make_get_current_colors(analysis: RawSpotifyResponse) -> Callable[[float], C
 
         duration = segment["duration"]
 
-        segment_loudness = scale_segment_loudness(get_segment_loudness(segment), get_section_segments(section))
-        # while duration < 0.5:       # while duration is less than .5 seconds, keep bunching up segments
-        #     n += 1
-        #     next_segment = get_next_n(t, n)
-        #     duration += next_segment['duration']
-        #     scaled_loudness += scale_segment_loudness(get_segment_loudness(next_segment))
-        #     if n > 50:
-        #         break
-        # scaled_loudness /= n
+        scaled_loudness = scale_segment_loudness(get_segment_loudness(segment), get_section_segments(section))
+        n = 1
+        while duration < 0.2:       # while duration is less than .5 seconds, keep bunching up segments
+            n += 1
+            next_segment = get_next_n(t, n)
+            duration += next_segment['duration']
+            scaled_loudness += scale_segment_loudness(get_segment_loudness(next_segment), get_section_segments(section))
+            if n > 50:
+                break
+        scaled_loudness /= n
 
-        return segment_loudness, scale_section_loudness(section["loudness"]), duration
+        return scaled_loudness, scale_section_loudness(section["loudness"]), duration
 
     return get_current_loudness
-
-# Events listener, device controller
-CONTROLLER_TICK = 0.01
-CONTROLLER_ERROR_DELAY = 1
-
 
 async def _events_to_colors(events_queue: asyncio.Queue[Event]) -> AsyncIterable[Colors, float]:
     get_current_colors = None
@@ -288,14 +243,13 @@ async def lights_controller(devices: List[yeelight.Bulb], events_queue: asyncio.
         try:
             async for mult_segment, mult_section, duration in _events_to_colors(events_queue):
                 # variation = last_loudness - loudness # for loudness = scale_loudness(segment['loudness_start'])
-
-                brightness = int(mult_segment * 20 + mult_section * 10)
+                brightness = int((mult_segment * mult_section * 50) + mult_section * 15)
                 if brightness != last_brightness:
                     logger.debug(f"brightness: {brightness:.0f} | mult_segment: {mult_segment:2.2f} | mult_section: {mult_section:2.2f} | duration: {duration:2.2f}s")
                     for device in devices:
                         asyncio.create_task(send_to_device(device, brightness, duration))
                     last_brightness = brightness
-                await asyncio.sleep(CONTROLLER_TICK)
+                await asyncio.sleep(duration)
 
         except Exception:
             logging.exception("Something went wrong with lights_controller")
@@ -311,7 +265,7 @@ def main():
     setup_logging("DEBUG")
 
     logger.info("Discovering bulbs...")
-    bulbs = yeelight.discover_bulbs(5)
+    bulbs = yeelight.discover_bulbs(10)
     logger.info(f"Found {len(bulbs)} bulbs in the network.")
     devices = []
     for bulb in [yeelight.Bulb(device["ip"], device["port"], effect="smooth", auto_on=False) for device in bulbs]:
