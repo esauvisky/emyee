@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# shamelessly stolen from https://gist.github.com/nvbn/73b613849cb176ec33057236b2fd4558
 from __future__ import annotations
 
 import array
@@ -19,22 +20,6 @@ from loguru import logger
 import time
 import sys
 
-
-def timeit(func):
-    """
-    Decorator to time and report elapsed time of functions
-    """
-    def wrapped(*args, **kwargs):
-        start = time.time()
-        result = func(*args, **kwargs)
-        end = time.time()
-        logger.debug("Function '{}' executed in {:f} s", func.__name__, end - start)
-        return result
-
-    return wrapped
-
-
-@timeit
 def setup_logging(level="DEBUG", show_module=False):
     """
     Setups better log format for loguru
@@ -46,12 +31,8 @@ def setup_logging(level="DEBUG", show_module=False):
     log_fmt += "{time:HH:mm:ss.SSS}]</green> <level>{level: <8}</level> | <level>{message}</level>"
     logger.add(sys.stderr, level=log_level, format=log_fmt, colorize=True, backtrace=True, diagnose=True)
 
-
-setup_logging("DEBUG")
-
 # Shared communication
 RawSpotifyResponse = Dict[str, Any]
-
 
 @dataclass
 class EventSongChanged:
@@ -142,16 +123,23 @@ class DeviceBus:
     def connection_lost(self, exc):
         logging.exception('Connection closed', exc_info=exc)
 
-
 async def send_to_device(device, brightness: int, duration: int) -> None:
-    if device.bulb_type.name == "WhiteTemp":
-        # color = (brightness[0][0], brightness[0][1], brightness[0][2])
-        # brightness = int((color[0] + color[1] + color[2]) / 3)
-        # if device.last_properties["bright"] != brightness:
-        logger.debug(f"Setting {device._ip} to {brightness} for {int(duration * 1000)}ms...")
-        device.duration = int(duration * 1000)
-        device.stop_flow()
+    logger.trace(f"Setting {device._ip} to {brightness} for {int(duration * 1000)}ms...")
+    # device.stop_flow()
+    device.duration = int(duration * 1000)
         device.set_brightness(brightness)
+        device.set_brightness(brightness)
+        # else:
+        #     logger.debug(f"Setting {device._ip} color to {(brightness[0][0], brightness[0][1], brightness[0][2])}...")
+        #     device.set_rgb(brightness[0][0], brightness[0][1], brightness[0][2])
+
+
+# Light collors selector, spooky, more details in the notebook
+SCALE = (100, 100, 100)
+BASE_COLOR_MULTIPLIER = 40
+LOUDNESS_MULTIPLIER = 3
+
+    device.set_brightness(brightness)
         # else:
         #     logger.debug(f"Setting {device._ip} color to {(brightness[0][0], brightness[0][1], brightness[0][2])}...")
         #     device.set_rgb(brightness[0][0], brightness[0][1], brightness[0][2])
@@ -171,121 +159,80 @@ def _normalize(pv: float) -> float:
     else:
         return pv
 
-
-_scale_pixel = lambda p: (int(_normalize(p[0]) * SCALE[0] / 255), int(_normalize(p[1]) * SCALE[1] / 255),
-                          int(_normalize(p[2]) * SCALE[2] / 255))
-
-
-def make_get_current_colors(analysis: RawSpotifyResponse, leds: int) -> Callable[[float], Colors]:
+def make_get_current_colors(analysis: RawSpotifyResponse) -> Callable[[float], Colors]:
 
     def make_get_current(name):
         keys = [x['start'] for x in analysis[name]]
         key_to_x = {x['start']: x for x in analysis[name]}
-        # print(keys)
-        # print(key_to_x)
         return lambda t: key_to_x[keys[bisect_left(keys, t) - 1]]
 
     def make_get_next(name):
         keys = [x['start'] for x in analysis[name]]
         key_to_x = {x['start']: x for x in analysis[name]}
-        # print(keys)
-        # print(key_to_x)
         return lambda t, n: key_to_x[keys[bisect_left(keys, t) - 1 + n]]
 
     get_current_segment = make_get_current('segments')
     get_current_section = make_get_current('sections')
     get_current_beat = make_get_current('beats')
-
     get_next_n = make_get_next('segments')
 
     def make_scale(name):
         xs = [x[name] for x in analysis['sections']]
         min_xs = min(xs)
         max_xs = max(xs)
+        logger.trace(f"minimum {name} is {min_xs}, maximum {name} is {max_xs}")
         return lambda x: (x-min_xs) / (max_xs-min_xs)
 
-    scale_loudness = make_scale('loudness')
+    def make_scale_log(name):
+        xs = [10 ** (x[name] / 10) for x in analysis['sections']]
+        min_xs = min(xs)
+        max_xs = max(xs)
+        logger.trace(f"minimum {name} is {min_xs}, maximum {name} is {max_xs}")
+        return lambda x: (10 ** (x / 10) - min_xs) / (max_xs - min_xs)
+
+    def get_segment_loudness(segment):
+        segment_start_loudness = segment['loudness_start'] * (segment['duration'] - segment['loudness_max_time']) / segment['duration']
+        segment_max_loudness = segment['loudness_max'] * segment['loudness_max_time'] / segment['duration']
+        return segment_start_loudness + segment_max_loudness
+
+    def make_scale_loudness():
+        loudnesses = [get_segment_loudness(x) for x in analysis['segments']]
+        min_segment_loudness = min(loudnesses)
+        max_segment_loudness = max(loudnesses)
+        logger.debug(f"minimum loudness is {min_segment_loudness}, maximum is {max_segment_loudness}")
+        return lambda x: (x-min_segment_loudness) / (max_segment_loudness-min_segment_loudness)
+
+    scale_section_loudness = make_scale_log('loudness')
+    scale_segment_loudness = make_scale_loudness()
     scale_tempo = make_scale('tempo')
 
-    def get_current_colors(t):
+    def get_current_loudness(t):
         segment = get_current_segment(t)
         section = get_current_section(t)
         beat = get_current_beat(t)
-        final_fucking_big_segment = {
-            'start': segment['start'],
-            'duration': segment['duration'],
-            'final_frigging_loudness': segment['loudness_start']
-        }
-        n = 1
-        total_duration = 0
-        numerador = segment['loudness_start'] * segment['duration']
-        while final_fucking_big_segment['duration'] < 0.5:       # while duration is less than .5 seconds, keep bunching up segments
-            next_segment = get_next_n(t, n)
-            print(f"duration: {next_segment['duration']}\t|| [Loudnessesesses] start: {next_segment['loudness_start']}\tmax: {next_segment['loudness_max']}\tmax_time: {next_segment['loudness_max_time']}")
-            final_fucking_big_segment['duration'] += next_segment['duration']
-            numerador += next_segment['loudness_start'] * next_segment['duration']
-            n += 1
-            if n > 50:
-                break
 
-        final_fucking_big_segment['final_frigging_loudness'] = numerador / final_fucking_big_segment['duration']
-        print(final_fucking_big_segment)
-        # print(f'minha fucking big segment é: ')
-        # pprint(final_fucking_big_segment)
-        # beat_brightness = (t - beat['start'] + beat['duration']) / beat['duration']
-        # tempo_color = BASE_COLOR_MULTIPLIER * scale_tempo(section['tempo'])
-        # pitch_color = [BASE_COLOR_MULTIPLIER * p for p in segment['pitches']]
+        duration = segment["duration"]
 
-        # print(beat_brightness')
-        loudness_brighness = ((60) * scale_loudness(segment['loudness_start']) - 5)
-        loudness_brighness = max(loudness_brighness + (10 * scale_loudness(segment['loudness_start']) - 5),0) # very slow
-        # loudness_brighness = max(round(loudness_brighness + (10 * scale_loudness(segment['loudness_start'] - sfinal_fucking_big_segment[egment['loudness_max']) / section['loudness'] - 5), 0), 0) # very quick
+        segment_loudness = scale_segment_loudness(get_segment_loudness(segment))
+        # while duration < 0.5:       # while duration is less than .5 seconds, keep bunching up segments
+        #     n += 1
+        #     next_segment = get_next_n(t, n)
+        #     duration += next_segment['duration']
+        #     scaled_loudness += scale_segment_loudness(get_segment_loudness(next_segment))
+        #     if n > 50:
+        #         break
+        # scaled_loudness /= n
 
-        # loudness_brighness = min(max(scale_loudness(final_fucking_big_segment['final_frigging_loudness']), 0) * 100, 100)
-        return loudness_brighness, final_fucking_big_segment['duration']
+        return segment_loudness, scale_section_loudness(section["loudness"]), duration
 
-    # # original
-    # def get_current_colors(t):
-    #     segment = get_current_segmnet(t)
-    #     section = get_current_section(t)
-    #     beat = get_current_beat(t)
-
-    #     beat_color = BASE_COLOR_MULTIPLIER * (t - beat['start'] + beat['duration']) / beat['duration'] - 100
-    #     # beat = (t - beat['start'] + beat['duration']) / beat['duration'] - 1
-    #     tempo_color = BASE_COLOR_MULTIPLIER * scale_tempo(section['tempo'])
-    #     pitch_colors = [BASE_COLOR_MULTIPLIER * p for p in segment['pitches']]
-
-    #     loudness_multiplier = 1 + LOUDNESS_MULTIPLIER * scale_loudness(section['loudness'])
-    #     # loudness = 100 * scale_loudness(section['loudness'])
-
-    #     colors = ((beat_color * loudness_multiplier, tempo_color * loudness_multiplier, pitch_colors[n // (leds//12)] * loudness_multiplier)
-    #               for n in range(leds))
-
-    #     if section['mode'] == 0:
-    #         order = (0, 1, 2)
-    #     elif section['mode'] == 1:
-    #         order = (1, 2, 0)
-    #     else:
-    #         order = (2, 0, 1)
-
-    #     ordered_colors = ((color[order[0]], color[order[1]], color[order[2]]) for color in colors)
-
-    #     return [_scale_pixel(color) for color in ordered_colors], segment["duration"]
-    #     # return beat
-
-    return get_current_colors
-
-
-def get_empty_colors(leds: int) -> Colors:
-    return [(0,) * 3] * leds, 0
-
+    return get_current_loudness
 
 # Events listener, device controller
 CONTROLLER_TICK = 0.01
 CONTROLLER_ERROR_DELAY = 1
 
 
-async def _events_to_colors(leds: int, events_queue: asyncio.Queue[Event]) -> AsyncIterable[Colors, float]:
+async def _events_to_colors(events_queue: asyncio.Queue[Event]) -> AsyncIterable[Colors, float]:
     get_current_colors = None
     start_time = 0
     event = EventStop()
@@ -297,38 +244,35 @@ async def _events_to_colors(leds: int, events_queue: asyncio.Queue[Event]) -> As
 
         if isinstance(event, EventSongChanged):
             start_time = event.start_time
-            get_current_colors = make_get_current_colors(event.analysis, leds)
+            get_current_colors = make_get_current_colors(event.analysis)
         elif isinstance(event, EventAdjustStartTime):
             start_time = event.start_time
         elif isinstance(event, EventStop):
             get_current_colors = None
 
-        if get_current_colors is None:
-            yield get_empty_colors(leds)
-        else:
+        if get_current_colors:
             yield get_current_colors(time.time() - start_time)
 
-async def schedule(func, delay):
-    await asyncio.sleep(delay)
-    await func
 
-async def lights_controller(devices: List[yeelight.Bulb], leds: int, events_queue: asyncio.Queue[Event]) -> NoReturn:
+
+async def lights_controller(devices: List[yeelight.Bulb], events_queue: asyncio.Queue[Event]) -> NoReturn:
     while True:
-        # loop = 0
+        last_brightness = 0
         try:
-            async for brightness, duration in _events_to_colors(leds, events_queue):
-                # brightness = int((colors[0][0] + colors[0][1] + colors[0][2]) / 3)
-                logger.info(f"Setting brightness to {brightness} for {int(duration * 1000)}ms...")
-                for device in devices:
-                    asyncio.create_task(send_to_device(device, brightness, duration))
-                # if loop % 4 == 0:
-                await asyncio.sleep(duration)
-                # loop += 1
-                # print(loop)
+            async for mult_segment, mult_section, duration in _events_to_colors(events_queue):
+                # variation = last_loudness - loudness # for loudness = scale_loudness(segment['loudness_start'])
+
+                brightness = int(mult_segment * 15 + mult_section * 25)
+                if brightness != last_brightness:
+                    logger.debug(f"brightness: {brightness:.0f} | mult_segment: {mult_segment:2.2f} | mult_section: {mult_section:2.2f} | duration: {duration:2.2f}s")
+                    for device in devices:
+                        asyncio.create_task(send_to_device(device, brightness, duration))
+                    last_brightness = brightness
+                await asyncio.sleep(CONTROLLER_TICK)
+
         except Exception:
             logging.exception("Something went wrong with lights_controller")
             await asyncio.sleep(CONTROLLER_ERROR_DELAY)
-        await asyncio.sleep(CONTROLLER_TICK)
 
 
 # Glue
@@ -337,27 +281,30 @@ def main():
     user_id = os.environ['USER_ID']
     client_id = os.environ['CLIENT_ID']
     client_secret = os.environ['CLIENT_SECRET']
-    leds = 12
+    setup_logging("DEBUG")
 
     logger.info("Discovering bulbs...")
-    devices = yeelight.discover_bulbs(2)
-    logger.info(f"Found {len(devices)} bulbs in the network.")
-    bulbs = [yeelight.Bulb(device["ip"], device["port"], effect="smooth", auto_on=False) for device in devices]
-    for bulb in bulbs:
-        logger.info(bulb.get_model_specs())
-        logger.info(bulb.get_capabilities())
-        logger.info(f"Setting music mode to {bulb._ip}")
-        try:
+    bulbs = yeelight.discover_bulbs(5)
+    logger.info(f"Found {len(bulbs)} bulbs in the network.")
+    devices = []
+    for bulb in [yeelight.Bulb(device["ip"], device["port"], effect="smooth", auto_on=False) for device in bulbs]:
+        logger.trace(bulb.get_model_specs())
+        logger.trace(bulb.get_capabilities())
+        logger.trace(bulb.get_properties())
+        if bulb.get_capabilities()["model"] == "ct_bulb":
+            logger.info(f"Setting music mode to {bulb._ip}")
             bulb.start_music()
-        except:
-            pass
+            devices.append(bulb)
+        else:
+            logger.warning(f"Not setting music mode to {bulb._ip} because it's not a ct_bulb bulb")
+    logger.success(f"Using {len(devices)} bulbs in the network.")
 
     events_queue = asyncio.Queue()
 
     loop = asyncio.get_event_loop()
     loop.run_until_complete(
         asyncio.gather(spotify_changes_listener(user_id, client_id, client_secret, events_queue),
-                       lights_controller(bulbs, leds, events_queue)))
+                       lights_controller(devices, events_queue)))
 
 
 if __name__ == '__main__':
