@@ -129,6 +129,30 @@ async def send_to_device(device, brightness: int, duration: int) -> None:
     device.duration = int(duration * 1000)
         device.set_brightness(brightness)
         device.set_brightness(brightness)
+        device.set_brightness(brightness)
+        # else:
+        #     logger.debug(f"Setting {device._ip} color to {(brightness[0][0], brightness[0][1], brightness[0][2])}...")
+        #     device.set_rgb(brightness[0][0], brightness[0][1], brightness[0][2])
+
+
+# Light collors selector, spooky, more details in the notebook
+SCALE = (100, 100, 100)
+BASE_COLOR_MULTIPLIER = 40
+LOUDNESS_MULTIPLIER = 3
+
+    device.set_brightness(brightness)
+        # else:
+        #     logger.debug(f"Setting {device._ip} color to {(brightness[0][0], brightness[0][1], brightness[0][2])}...")
+        #     device.set_rgb(brightness[0][0], brightness[0][1], brightness[0][2])
+
+
+# Light collors selector, spooky, more details in the notebook
+SCALE = (100, 100, 100)
+BASE_COLOR_MULTIPLIER = 40
+LOUDNESS_MULTIPLIER = 3
+
+    device.set_brightness(brightness)
+        device.set_brightness(brightness)
         # else:
         #     logger.debug(f"Setting {device._ip} color to {(brightness[0][0], brightness[0][1], brightness[0][2])}...")
         #     device.set_rgb(brightness[0][0], brightness[0][1], brightness[0][2])
@@ -183,8 +207,8 @@ def make_get_current_colors(analysis: RawSpotifyResponse) -> Callable[[float], C
         logger.trace(f"minimum {name} is {min_xs}, maximum {name} is {max_xs}")
         return lambda x: (x-min_xs) / (max_xs-min_xs)
 
-    def make_scale_log(name):
-        xs = [10 ** (x[name] / 10) for x in analysis['sections']]
+    def make_scale_log(name, where):
+        xs = [10 ** (x[name] / 10) for x in where]
         min_xs = min(xs)
         max_xs = max(xs)
         logger.trace(f"minimum {name} is {min_xs}, maximum {name} is {max_xs}")
@@ -195,16 +219,19 @@ def make_get_current_colors(analysis: RawSpotifyResponse) -> Callable[[float], C
         segment_max_loudness = segment['loudness_max'] * segment['loudness_max_time'] / segment['duration']
         return segment_start_loudness + segment_max_loudness
 
-    def make_scale_loudness():
-        loudnesses = [get_segment_loudness(x) for x in analysis['segments']]
+    def get_section_segments(section):
+        for s in analysis['segments']:
+            if s['start'] >= section['start'] and s['start'] < section['start'] + section['duration']:
+                yield s
+
+    scale_section_loudness = make_scale_log('loudness', analysis['sections'])
+    # scale_segment_loudness = make_scale_log('loudness', analysis['segments'])
+
+    def scale_segment_loudness(loudness, segments):
+        loudnesses = [get_segment_loudness(s) for s in segments]
         min_segment_loudness = min(loudnesses)
         max_segment_loudness = max(loudnesses)
-        logger.debug(f"minimum loudness is {min_segment_loudness}, maximum is {max_segment_loudness}")
-        return lambda x: (x-min_segment_loudness) / (max_segment_loudness-min_segment_loudness)
-
-    scale_section_loudness = make_scale_log('loudness')
-    scale_segment_loudness = make_scale_loudness()
-    scale_tempo = make_scale('tempo')
+        return (loudness - min_segment_loudness) / (max_segment_loudness-min_segment_loudness)
 
     def get_current_loudness(t):
         segment = get_current_segment(t)
@@ -213,7 +240,7 @@ def make_get_current_colors(analysis: RawSpotifyResponse) -> Callable[[float], C
 
         duration = segment["duration"]
 
-        segment_loudness = scale_segment_loudness(get_segment_loudness(segment))
+        segment_loudness = scale_segment_loudness(get_segment_loudness(segment), get_section_segments(section))
         # while duration < 0.5:       # while duration is less than .5 seconds, keep bunching up segments
         #     n += 1
         #     next_segment = get_next_n(t, n)
@@ -262,7 +289,7 @@ async def lights_controller(devices: List[yeelight.Bulb], events_queue: asyncio.
             async for mult_segment, mult_section, duration in _events_to_colors(events_queue):
                 # variation = last_loudness - loudness # for loudness = scale_loudness(segment['loudness_start'])
 
-                brightness = int(mult_segment * 15 + mult_section * 25)
+                brightness = int(mult_segment * 20 + mult_section * 10)
                 if brightness != last_brightness:
                     logger.debug(f"brightness: {brightness:.0f} | mult_segment: {mult_segment:2.2f} | mult_section: {mult_section:2.2f} | duration: {duration:2.2f}s")
                     for device in devices:
