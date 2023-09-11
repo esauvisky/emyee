@@ -197,19 +197,20 @@ def make_get_current_colors(analysis: RawSpotifyResponse) -> Callable[[float], C
         section = get_current_section(t)
         beat = get_current_beat(t)
 
-        duration = segment["duration"]
+        # duration = segment["duration"]
 
         scaled_loudness = scale_segment_loudness(get_segment_loudness(segment), get_section_segments(section))
-        n = 1
-        while duration < 0.2:       # while duration is less than .5 seconds, keep bunching up segments
-            n += 1
-            next_segment = get_next_n(t, n)
-            duration += next_segment['duration']
-            scaled_loudness += scale_segment_loudness(get_segment_loudness(next_segment), get_section_segments(section))
-            if n > 50:
-                break
-        scaled_loudness /= n
-
+        duration = beat['duration']
+        # n = 1
+        # while True:       # while duration is less than .5 seconds, keep bunching up segments
+        #     n += 1
+        #     next_segment = get_next_n(t, n)
+        #     duration += next_segment['duration']
+        #     scaled_loudness += scale_segment_loudness(get_segment_loudness(next_segment), get_section_segments(section))
+        #     if n > 1:
+        #         break
+        # scaled_loudness /= n
+        # duration = beat['duration']
         return scaled_loudness, scale_section_loudness(section["loudness"]), duration
 
     return get_current_loudness
@@ -236,7 +237,6 @@ async def _events_to_colors(events_queue: asyncio.Queue[Event]) -> AsyncIterable
             yield get_current_colors(time.time() - start_time)
 
 
-
 async def lights_controller(devices: List[yeelight.Bulb], events_queue: asyncio.Queue[Event]) -> NoReturn:
     while True:
         last_brightness = 0
@@ -244,11 +244,14 @@ async def lights_controller(devices: List[yeelight.Bulb], events_queue: asyncio.
             async for mult_segment, mult_section, duration in _events_to_colors(events_queue):
                 # variation = last_loudness - loudness # for loudness = scale_loudness(segment['loudness_start'])
                 brightness = int((mult_segment * mult_section * 50) + mult_section * 15)
-                if brightness != last_brightness:
-                    logger.debug(f"brightness: {brightness:.0f} | mult_segment: {mult_segment:2.2f} | mult_section: {mult_section:2.2f} | duration: {duration:2.2f}s")
-                    for device in devices:
-                        asyncio.create_task(send_to_device(device, brightness, duration))
+                if last_brightness == 0:
                     last_brightness = brightness
+                else:
+                    last_brightness = 0
+                logger.debug(f"brightness: {last_brightness:.0f} | mult_segment: {mult_segment:2.2f} | mult_section: {mult_section:2.2f} | duration: {duration:2.2f}s")
+                for device in devices:
+                    asyncio.create_task(send_to_device(device, last_brightness, duration / 4))
+                # last_brightness = brightness
                 await asyncio.sleep(duration)
 
         except Exception:
