@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import array
 import asyncio
+import random
 import dotenv
 from bisect import bisect_left
 from dataclasses import dataclass
@@ -128,11 +129,46 @@ class DeviceBus:
     def connection_lost(self, exc):
         logging.exception('Connection closed', exc_info=exc)
 
+
+# Global variables to store the last RGB color and brightness
+last_rgb = (0, 0, 0)
+last_brightness = 0
+
+import random
+
+# Global variables to store the last RGB color and the last brightness
+last_rgb = (0, 0, 0)
+last_brightness = 0
+
+def get_color_change_scale(current_brightness, max_brightness=50):
+    # Calculate the absolute difference in brightness
+    brightness_difference = abs(current_brightness - last_brightness)
+    # Scale the change - larger difference allows for larger color change
+    scale = brightness_difference / max_brightness
+    return scale
+
 async def send_to_device(device, brightness: int, duration: int) -> None:
+    global last_rgb, last_brightness
     logger.trace(f"Setting {device._ip} to {brightness} for {int(duration * 1000)}ms...")
-    # device.stop_flow()
+
+    # Determine the scale of color change based on the brightness difference
+    color_change_scale = get_color_change_scale(brightness)
+
+    # Calculate new RGB values, allowing for a change proportional to the brightness difference
+    new_r = int(last_rgb[0] + color_change_scale * random.randint(-255, 255)) % 256
+    new_g = int(last_rgb[1] + color_change_scale * random.randint(-255, 255)) % 256
+    new_b = int(last_rgb[2] + color_change_scale * random.randint(-255, 255)) % 256
+
     device.duration = int(duration * 1000 - CONTROLLER_TICK * 1000)
     device.set_brightness(brightness)
+    device.set_rgb(new_r, new_g, new_b)
+
+    # Update the last_rgb and last_brightness
+    last_rgb = (new_r, new_g, new_b)
+    last_brightness = brightness
+
+    # Optionally, log the new color and brightness
+    logger.trace(f"New RGB color set: {last_rgb}, New brightness: {last_brightness}")
 
 def _normalize(pv: float) -> float:
     if pv < 0:
@@ -243,7 +279,7 @@ async def lights_controller(devices: List[yeelight.Bulb], events_queue: asyncio.
         try:
             async for mult_segment, mult_section, duration in _events_to_colors(events_queue):
                 # variation = last_loudness - loudness # for loudness = scale_loudness(segment['loudness_start'])
-                brightness = int((mult_segment * mult_section * 50) + mult_section * 15)
+                brightness = int((mult_segment * mult_section * 30) + mult_section * 15)
                 if brightness != last_brightness:
                     logger.debug(f"brightness: {brightness:.0f} | mult_segment: {mult_segment:2.2f} | mult_section: {mult_section:2.2f} | duration: {duration:2.2f}s")
                     for device in devices:
@@ -272,12 +308,12 @@ def main():
         logger.trace(bulb.get_model_specs())
         logger.trace(bulb.get_capabilities())
         logger.trace(bulb.get_properties())
-        if bulb.get_capabilities()["model"] == "ct_bulb":
-            logger.info(f"Setting music mode to {bulb._ip}")
-            bulb.start_music()
-            devices.append(bulb)
-        else:
-            logger.warning(f"Not setting music mode to {bulb._ip} because it's not a ct_bulb bulb")
+        # if bulb.get_capabilities()["model"] == "ct_bulb":
+        logger.info(f"Setting music mode to {bulb._ip}")
+        bulb.start_music()
+        devices.append(bulb)
+        # else:
+        #     logger.warning(f"Not setting music mode to {bulb._ip} because it's not a ct_bulb bulb")
     logger.success(f"Using {len(devices)} bulbs in the network.")
 
     events_queue = asyncio.Queue()
