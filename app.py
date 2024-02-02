@@ -128,11 +128,55 @@ class DeviceBus:
     def connection_lost(self, exc):
         logging.exception('Connection closed', exc_info=exc)
 
-async def send_to_device(device, brightness: int, duration: int) -> None:
+import random
+last_mult_section = 0
+last_rgb = (0, 0, 0)
+
+# An expanded array that includes primary, secondary, and tertiary colors
+COLORS = [
+    (255, 0, 0),     # Red
+    (0, 255, 0),     # Green
+    (0, 0, 255),     # Blue
+    (255, 255, 0),   # Yellow
+    (0, 255, 255),   # Cyan
+    (255, 0, 255),   # Magenta
+    (128, 0, 0),     # Maroon
+    (128, 128, 0),   # Olive
+    (0, 128, 0),     # Dark Green
+    (128, 0, 128),   # Purple
+    (0, 128, 128),   # Teal
+    (0, 0, 128),     # Navy
+    (255, 165, 0),   # Orange
+    (255, 192, 203), # Pink
+    (255, 215, 0),   # Gold
+    (75, 0, 130),    # Indigo
+    (240, 128, 128), # Light Coral
+    (95, 158, 160),  # Cadet Blue
+    # Add more colors as needed
+]
+
+last_mult_section = 0
+last_rgb = (0, 0, 0)
+
+async def send_to_device(device: Device, brightness: int, duration: int, mult_section: float) -> None:
+    global last_mult_section, last_rgb
     logger.trace(f"Setting {device._ip} to {brightness} for {int(duration * 1000)}ms...")
-    # device.stop_flow()
+
     device.duration = int(duration * 1000 - CONTROLLER_TICK * 1000)
     device.set_brightness(brightness)
+    if mult_section != last_mult_section:
+        # Select a random color from the COLORS array
+        new_rgb = random.choice(COLORS)
+        last_mult_section = mult_section
+        last_rgb = new_rgb
+        logger.info(f"New RGB: {new_rgb[0]}, {new_rgb[1]}, {new_rgb[2]}")
+        device.set_rgb(*last_rgb)
+    else:
+        random_rgb = tuple(max(0, min(255, component + random.randint(-20, 20))) for component in last_rgb)
+        device.set_rgb(*random_rgb)
+
+    # Optionally, log the new color and brightness
+    logger.info(f"New brightness: {brightness}")
 
 def _normalize(pv: float) -> float:
     if pv < 0:
@@ -247,7 +291,7 @@ async def lights_controller(devices: List[yeelight.Bulb], events_queue: asyncio.
                 if brightness != last_brightness:
                     logger.debug(f"brightness: {brightness:.0f} | mult_segment: {mult_segment:2.2f} | mult_section: {mult_section:2.2f} | duration: {duration:2.2f}s")
                     for device in devices:
-                        asyncio.create_task(send_to_device(device, brightness, duration))
+                        asyncio.create_task(send_to_device(device, brightness, duration, mult_section))
                     last_brightness = brightness
                 await asyncio.sleep(duration)
 
@@ -272,12 +316,15 @@ def main():
         logger.trace(bulb.get_model_specs())
         logger.trace(bulb.get_capabilities())
         logger.trace(bulb.get_properties())
-        if bulb.get_capabilities()["model"] == "ct_bulb":
+        try:
             logger.info(f"Setting music mode to {bulb._ip}")
             bulb.start_music()
             devices.append(bulb)
-        else:
-            logger.warning(f"Not setting music mode to {bulb._ip} because it's not a ct_bulb bulb")
+        except Exception:
+            logger.debug(f"Not setting music mode to {bulb._ip}")
+        # if bulb.get_capabilities()["model"] == "ct_bulb":
+        # else:
+        #     logger.warning(f"Not setting music mode to {bulb._ip} because it's not a ct_bulb bulb")
     logger.success(f"Using {len(devices)} bulbs in the network.")
 
     events_queue = asyncio.Queue()
