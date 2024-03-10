@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import array
 import asyncio
+from pprint import pprint
 import dotenv
 from bisect import bisect_left
 from dataclasses import dataclass
@@ -21,7 +22,7 @@ import time
 import sys
 
 # Events listener, device controller
-CONTROLLER_TICK = 0.01
+CONTROLLER_TICK = 0
 CONTROLLER_ERROR_DELAY = 1
 
 
@@ -63,7 +64,7 @@ Colors = List[Tuple[int, int, int]]
 API_CURRENT_PLAYING = 'https://api.spotify.com/v1/me/player/currently-playing'
 API_AUDIO_ANALYSIS = 'https://api.spotify.com/v1/audio-analysis/'
 SPOTIFY_SCOPE = 'user-read-currently-playing,user-read-playback-state'
-SPOTIFY_CHANGES_LISTENER_DEALY = 1
+SPOTIFY_CHANGES_LISTENER_DELAY = 0.01
 SPOTIFY_CHANGES_LISTENER_FAILURE_DELAY = 1
 
 
@@ -98,7 +99,7 @@ async def _listen_to_spotify_changes(session: aiohttp.ClientSession) -> AsyncIte
         else:
             yield EventAdjustStartTime(_get_start_time(current, request_time))
 
-        await asyncio.sleep(SPOTIFY_CHANGES_LISTENER_DEALY)
+        await asyncio.sleep(SPOTIFY_CHANGES_LISTENER_DELAY)
 
 
 async def spotify_changes_listener(user_id: str, client_id: str, client_secret: str, events_queue: asyncio.Queue[Event]) -> NoReturn:
@@ -160,23 +161,15 @@ last_rgb = (0, 0, 0)
 
 async def send_to_device(device: Device, brightness: int, duration: int, mult_section: float) -> None:
     global last_mult_section, last_rgb
-    logger.trace(f"Setting {device._ip} to {brightness} for {int(duration * 1000)}ms...")
+    logger.debug(f"Setting {device._ip} to {brightness} for {int(duration * 1000)}ms...")
 
+    device.duration = 0
+    device.set_rgb(*last_rgb)
     device.duration = int(duration * 1000 - CONTROLLER_TICK * 1000)
     device.set_brightness(brightness)
-    if mult_section != last_mult_section:
-        # Select a random color from the COLORS array
-        new_rgb = random.choice(COLORS)
-        last_mult_section = mult_section
-        last_rgb = new_rgb
-        logger.info(f"New RGB: {new_rgb[0]}, {new_rgb[1]}, {new_rgb[2]}")
-        device.set_rgb(*last_rgb)
-    else:
-        random_rgb = tuple(max(0, min(255, component + random.randint(-20, 20))) for component in last_rgb)
-        device.set_rgb(*random_rgb)
 
     # Optionally, log the new color and brightness
-    logger.info(f"New brightness: {brightness}")
+    # logger.info(f"New brightness: {brightness}")
 
 def _normalize(pv: float) -> float:
     if pv < 0:
@@ -186,25 +179,75 @@ def _normalize(pv: float) -> float:
     else:
         return pv
 
-def make_get_current_colors(analysis: RawSpotifyResponse) -> Callable[[float], Colors]:
+def aggregate_high_confidence_items(items):
+    high_confidence_items = [item for item in items if item['confidence'] > 0.5]
+    if not high_confidence_items:
+        return None
+
+    aggregated = {
+        'start': high_confidence_items[0]['start'],
+        'duration': sum(item['duration'] for item in high_confidence_items),
+        'confidence': sum(item['confidence'] for item in high_confidence_items) / len(high_confidence_items),
+        'loudness': sum(item.get('loudness', 0) for item in high_confidence_items) / len(high_confidence_items),
+        'loudness_start': high_confidence_items[0].get('loudness_start'),
+        'tempo': sum(item.get('tempo', 0) for item in high_confidence_items) / len(high_confidence_items),
+        'tempo_confidence': sum(item.get('tempo_confidence', 0) for item in high_confidence_items) / len(high_confidence_items),
+        'key': high_confidence_items[0].get('key'),
+        'key_confidence': high_confidence_items[0].get('key_confidence'),
+        'mode': high_confidence_items[0].get('mode'),
+        'mode_confidence': sum(item.get('mode_confidence', 0) for item in high_confidence_items) / len(high_confidence_items),
+        'time_signature': high_confidence_items[0].get('time_signature'),
+        'time_signature_confidence': high_confidence_items[0].get('time_signature_confidence'),
+        'loudness_max': max(item.get('loudness_max', float('-inf')) for item in high_confidence_items),
+        'loudness_max_time': high_confidence_items[high_confidence_items.index(max(high_confidence_items, key=lambda item: item.get('loudness_max', float('-inf'))))].get('loudness_max_time'),
+        'loudness_end': high_confidence_items[-1].get('loudness_end'),
+        'pitches': high_confidence_items[0].get('pitches'),
+        'timbre': high_confidence_items[0].get('timbre'),
+    }
+
+    return aggregated
+
+def make_get_current_colors(music: RawSpotifyResponse) -> Callable[[float], Colors]:
 
     def make_get_current(name):
-        keys = [x['start'] for x in analysis[name]]
-        key_to_x = {x['start']: x for x in analysis[name]}
-        return lambda t: key_to_x[keys[bisect_left(keys, t) - 1]]
+        keys = [x['start'] for x in music[name]]
+        key_to_x = {x['start']: x for x in music[name]}
+        items_sorted_by_start = sorted(music[name], key=lambda x: x['start'])
+
+        def current_aggregate(t):
+            index = bisect_left(keys, t) - 1
+            current_item = items_sorted_by_start[index]
+            # Find all subsequent items with high confidence
+            high_confidence_items = [item for item in items_sorted_by_start[index:] if item['confidence'] > 0.5]
+            return aggregate_high_confidence_items(high_confidence_items[:1])  # Just the current item if alone
+
+        return current_aggregate
+
+    def make_get_maximums(name):
+        keys = [x['start'] for x in music[name]]
+        key_to_x = {x['start']: x for x in music[name]}
+        items_sorted_by_start = sorted(music[name], key=lambda x: x['start'])
 
     def make_get_next(name):
-        keys = [x['start'] for x in analysis[name]]
-        key_to_x = {x['start']: x for x in analysis[name]}
-        return lambda t, n: key_to_x[keys[bisect_left(keys, t) - 1 + n]]
+        keys = [x['start'] for x in music[name]]
+        key_to_x = {x['start']: x for x in music[name]}
+        items_sorted_by_start = sorted(music[name], key=lambda x: x['start'])
 
+        def next_aggregate(t, n):
+            index = bisect_left(keys, t) - 1 + n
+            next_items = items_sorted_by_start[index:index+n]  # Get n items starting from the next one
+            high_confidence_items = [item for item in next_items if item['confidence'] > 0.5]
+            return aggregate_high_confidence_items(high_confidence_items)
+
+        return next_aggregate
     get_current_segment = make_get_current('segments')
     get_current_section = make_get_current('sections')
     get_current_beat = make_get_current('beats')
-    get_next_n = make_get_next('segments')
+    get_next_segment = make_get_next('segments')
+    get_next_section = make_get_next('sections')
 
     def make_scale(name):
-        xs = [x[name] for x in analysis['sections']]
+        xs = [x[name] for x in music['sections']]
         min_xs = min(xs)
         max_xs = max(xs)
         logger.trace(f"minimum {name} is {min_xs}, maximum {name} is {max_xs}")
@@ -223,11 +266,11 @@ def make_get_current_colors(analysis: RawSpotifyResponse) -> Callable[[float], C
         return segment_start_loudness + segment_max_loudness
 
     def get_section_segments(section):
-        for s in analysis['segments']:
+        for s in music['segments']:
             if s['start'] >= section['start'] and s['start'] < section['start'] + section['duration']:
                 yield s
 
-    scale_section_loudness = make_scale_log('loudness', analysis['sections'])
+    scale_section_loudness = make_scale_log('loudness', music['sections'])
     # scale_segment_loudness = make_scale_log('loudness', analysis['segments'])
 
     def scale_segment_loudness(loudness, segments):
@@ -237,25 +280,50 @@ def make_get_current_colors(analysis: RawSpotifyResponse) -> Callable[[float], C
         return (loudness - min_segment_loudness) / (max_segment_loudness-min_segment_loudness)
 
     def get_current_loudness(t):
-        segment = get_current_segment(t)
-        section = get_current_section(t)
-        beat = get_current_beat(t)
+        # Helper function to get segment loudness
 
-        duration = segment["duration"]
+        segments = sorted([s for s in music['segments'] if s['start'] <= t], key=lambda x: x['start'], reverse=True)
+        sections = sorted([s for s in music['sections'] if s['start'] <= t], key=lambda x: x['start'], reverse=True)
+        # all_segments_from_all_sections = [s for s in music['segments']]
 
-        scaled_loudness = scale_segment_loudness(get_segment_loudness(segment), get_section_segments(section))
-        n = 1
-        while duration < 0.2:       # while duration is less than .5 seconds, keep bunching up segments
-            n += 1
-            next_segment = get_next_n(t, n)
-            duration += next_segment['duration']
-            scaled_loudness += scale_segment_loudness(get_segment_loudness(next_segment), get_section_segments(section))
-            if n > 50:
+        first_segment = segments[0] if segments else None
+        current_section = sections[0] if sections else None
+        next_section = sections[1] if sections else None
+
+        if not first_segment or not current_section:
+            return None
+
+        # Aggregate segments with confidence < 0.75
+        agg_duration = 0
+        agg_loudness = 0
+        count = 0
+        final_start = first_segment['start']
+        for next_segment in music['segments']:
+            if next_segment['start'] >= first_segment['start'] and next_segment['start'] <= next_section['start']:
+                final_start = next_segment['start']
+                agg_duration += next_segment['duration']
+                agg_loudness += get_segment_loudness(next_segment)
+                count += 1
+                print("somei mais um")
+            else:
                 break
-        scaled_loudness /= n
 
-        return scaled_loudness, scale_section_loudness(section["loudness"]), duration
+        delay = final_start - first_segment['start']
+        avg_loudness = agg_loudness / count if count > 0 else get_segment_loudness(first_segment)
 
+        analysis_segments = [segment for segment in music['segments']]
+        loudness = int(scale_segment_loudness(avg_loudness, analysis_segments) * 50)
+
+        current_segment_object = {
+            'delay': delay,
+            'duration': agg_duration,
+            'loudness': loudness,
+            'section_start': current_section['start'],
+            'section_end': current_section['start'] + current_section['duration'],
+            'section_loudness': current_section['loudness']
+        }
+
+        return current_segment_object
     return get_current_loudness
 
 async def _events_to_colors(events_queue: asyncio.Queue[Event]) -> AsyncIterable[Colors, float]:
@@ -263,8 +331,6 @@ async def _events_to_colors(events_queue: asyncio.Queue[Event]) -> AsyncIterable
     start_time = 0
     event = EventStop()
     while True:
-        await asyncio.sleep(CONTROLLER_TICK)
-
         while not events_queue.empty():
             event = events_queue.get_nowait()
 
@@ -279,25 +345,48 @@ async def _events_to_colors(events_queue: asyncio.Queue[Event]) -> AsyncIterable
         if get_current_colors:
             yield get_current_colors(time.time() - start_time)
 
+        await asyncio.sleep(CONTROLLER_TICK)
+
 
 
 async def lights_controller(devices: List[yeelight.Bulb], events_queue: asyncio.Queue[Event]) -> NoReturn:
     while True:
         last_brightness = 0
+        last_section_loudness = 0
+        color = random.choice(COLORS)
         try:
-            async for mult_segment, mult_section, duration in _events_to_colors(events_queue):
-                # variation = last_loudness - loudness # for loudness = scale_loudness(segment['loudness_start'])
-                brightness = int((mult_segment * mult_section * 50) + mult_section * 15)
-                if brightness != last_brightness:
-                    logger.debug(f"brightness: {brightness:.0f} | mult_segment: {mult_segment:2.2f} | mult_section: {mult_section:2.2f} | duration: {duration:2.2f}s")
+            async for info in _events_to_colors(events_queue):
+                for device in devices:
+                    device.duration = int(info["duration"] * 1000 - CONTROLLER_TICK * 1000)
+
+                if info["section_loudness"] != last_section_loudness or info["loudness"] != last_brightness:
+                    logger.debug(pprint(info))
+                    await asyncio.sleep(info["delay"])
+
+                if info["section_loudness"] != last_section_loudness:
+                    actual_color = get_new_color(color)
                     for device in devices:
-                        asyncio.create_task(send_to_device(device, brightness, duration, mult_section))
-                    last_brightness = brightness
-                await asyncio.sleep(duration)
+                        device.set_rgb(*actual_color)
+                    last_section_loudness = info["section_loudness"]
+
+                if section != last_brightness:
+                    for device in devices:
+                        device.set_brightness(section)
+                    last_brightness = section
+
+                await asyncio.sleep(CONTROLLER_TICK)
+                # await asyncio.sleep(duration - 2 * CONTROLLER_TICK)
 
         except Exception:
             logging.exception("Something went wrong with lights_controller")
             await asyncio.sleep(CONTROLLER_ERROR_DELAY)
+
+def get_new_color(color):
+    colors = list(COLORS)
+    del colors[COLORS.index(color)]
+    color = random.choice(colors)
+    actual_color = tuple(max(0, min(255, component + random.randint(-20, 20))) for component in color)
+    return actual_color
 
 
 # Glue
@@ -316,13 +405,13 @@ def main():
         logger.trace(bulb.get_model_specs())
         logger.trace(bulb.get_capabilities())
         logger.trace(bulb.get_properties())
-        try:
-            logger.info(f"Setting music mode to {bulb._ip}")
-            bulb.start_music()
-            devices.append(bulb)
-        except Exception:
-            logger.debug(f"Not setting music mode to {bulb._ip}")
-        # if bulb.get_capabilities()["model"] == "ct_bulb":
+        if bulb.get_capabilities()["model"] != "ct_bulb":
+            try:
+                logger.info(f"Setting music mode to {bulb._ip}")
+                bulb.start_music()
+                devices.append(bulb)
+            except Exception:
+                logger.debug(f"Not setting music mode to {bulb._ip}")
         # else:
         #     logger.warning(f"Not setting music mode to {bulb._ip} because it's not a ct_bulb bulb")
     logger.success(f"Using {len(devices)} bulbs in the network.")
