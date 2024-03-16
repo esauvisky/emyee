@@ -12,66 +12,56 @@ from utils import SPOTIFY_CHANGES_LISTENER_DELAY, SPOTIFY_CHANGES_LISTENER_FAILU
 
 
 class SpotifyChangesListener:
-    def __init__(self, user_id, client_id, client_secret, events_queue: asyncio.Queue):
+    def __init__(self, user_id, client_id, client_secret, events_queue):
         self.user_id = user_id
         self.client_id = client_id
         self.client_secret = client_secret
         self.events_queue = events_queue
-        self.current_track_id = None
-        self.current_progress = 0  # Initial progress in seconds
-        self.last_api_update_time = 0
-        self.spotify_auth = SpotifyOAuth(client_id=client_id,
-                                         client_secret=client_secret,
+        self.last_request_time = 0
+        self.spotify_auth = SpotifyOAuth(client_id=self.client_id,
+                                         client_secret=self.client_secret,
                                          redirect_uri=SPOTIFY_REDIRECT_URI,
                                          scope=SPOTIFY_SCOPE)
 
     async def listen(self):
-        # Start the background task for fetching updates from Spotify
-        asyncio.create_task(self.fetch_spotify_changes())
-
         while True:
-            # Update the progress based on the delay
-            if self.current_progress > SPOTIFY_CHANGES_LISTENER_FAILURE_DELAY:
-                current_progress = self.current_progress + time.time() - self.last_api_update_time
-                while self.events_queue.full():
-                    current_progress = self.current_progress + time.time() - self.last_api_update_time + SPOTIFY_CHANGES_LISTENER_DELAY
-                    await asyncio.sleep(SPOTIFY_CHANGES_LISTENER_DELAY)
-                self.events_queue.put_nowait(EventAdjustProgressTime(current_progress))
+            access_token = prompt_for_user_token(self.user_id,
+                                        SPOTIFY_SCOPE,
+                                        client_id=self.client_id,
+                                        client_secret=self.client_secret,
+                                        redirect_uri=SPOTIFY_REDIRECT_URI)
+            if not access_token:
+                logger.error("Failed to retrieve Spotify token.")
+                await asyncio.sleep(SPOTIFY_CHANGES_LISTENER_FAILURE_DELAY)
+                continue
+
+            headers = {'Authorization': f"Bearer {access_token}"}
+            async with aiohttp.ClientSession(headers=headers) as session:
+                try:
+                    await self._listen_to_spotify_changes(session)
+                except Exception as e:
+                    logger.exception(f"Something went wrong with spotify_changes_listener: {e}")
+                    await asyncio.sleep(SPOTIFY_CHANGES_LISTENER_FAILURE_DELAY)
+
+    async def _listen_to_spotify_changes(self, session):
+        current_id = None
+        while True:
+            # request_time = asyncio.get_event_loop().time()
+            current_playing = await self._get_current_playing(session)
+            if not current_playing.get('is_playing', False):
+                current_id = None
+                await self.events_queue.put(EventStop())
+            elif current_playing['item']['id'] != current_id:
+                current_id = current_playing['item']['id']
+                analysis = await self._get_audio_analysis(session, current_id)
+                progress = current_playing['progress_ms'] / 1000
+                await self.events_queue.put(EventSongChanged(analysis, progress))
+            else:
+                progress = current_playing['progress_ms'] / 1000
+                await self.events_queue.put(EventAdjustProgressTime(progress))
+
             await asyncio.sleep(SPOTIFY_CHANGES_LISTENER_DELAY)
 
-    async def fetch_spotify_changes(self):
-        loop = asyncio.get_running_loop()
-        while True:
-            # Ensure enough time has passed before making another API call
-            if time.time() - self.last_api_update_time >= API_REQUEST_INTERVAL:
-                access_token = await loop.run_in_executor(None, lambda: prompt_for_user_token(
-                    self.user_id,
-                    SPOTIFY_SCOPE,
-                    client_id=self.client_id,
-                    client_secret=self.client_secret,
-                    redirect_uri=SPOTIFY_REDIRECT_URI,
-                ))
-
-                if not access_token:
-                    logger.error("Failed to retrieve Spotify token.")
-                    await asyncio.sleep(SPOTIFY_CHANGES_LISTENER_FAILURE_DELAY)
-                    continue
-
-                headers = {'Authorization': f"Bearer {access_token}"}
-                async with aiohttp.ClientSession(headers=headers) as session:
-                    current_playing = await self._get_current_playing(session)
-                    if not current_playing.get('is_playing', False):
-                        self.current_track_id = None
-                        await self.events_queue.put(EventStop())
-                    elif current_playing['item']['id'] != self.current_track_id:
-                        self.current_track_id = current_playing['item']['id']
-                        analysis = await self._get_audio_analysis(session, self.current_track_id)
-                        self.current_progress = current_playing['progress_ms'] / 1000
-                        await self.events_queue.put(EventSongChanged(analysis, self.current_progress))
-                    self.last_api_update_time = time.time()
-                    self.current_progress = current_playing['progress_ms'] / 1000
-
-            await asyncio.sleep(SPOTIFY_CHANGES_LISTENER_DELAY)  # Small sleep to prevent tight loop in case of errors
 
     async def _get_current_playing(self, session):
         async with session.get(API_CURRENT_PLAYING) as response:
