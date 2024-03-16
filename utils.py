@@ -9,11 +9,11 @@ RawSpotifyResponse = Dict[str, Any]
 CONTROLLER_TICK = 0.01
 API_CURRENT_PLAYING = 'https://api.spotify.com/v1/me/player/currently-playing'
 API_AUDIO_ANALYSIS = 'https://api.spotify.com/v1/audio-analysis/'
-SPOTIFY_CHANGES_LISTENER_DELAY = 0.001
-SPOTIFY_CHANGES_LISTENER_FAILURE_DELAY = 0.1
+SPOTIFY_CHANGES_LISTENER_DELAY = 0.1
+SPOTIFY_CHANGES_LISTENER_FAILURE_DELAY = 1
 SPOTIFY_REDIRECT_URI = 'http://localhost:8000/'
 SPOTIFY_SCOPE = 'user-read-currently-playing,user-read-playback-state'
-API_REQUEST_INTERVAL = 5
+API_REQUEST_INTERVAL = 0.5
 COLORS = [
     (255, 0, 0),        # Red
     (0, 255, 0),        # Green

@@ -22,18 +22,20 @@ class LightsController:
     async def control_lights(self):
         event = EventStop()
         while True:
-            while not self.events_queue.empty():
-                event = self.events_queue.get_nowait()
-
+            event = await self.events_queue.get()
             if isinstance(event, EventSongChanged):
                 logger.debug("Song changed!")
                 self.handle_song_changed(event)
+                self.events_queue.task_done()
             elif isinstance(event, EventAdjustProgressTime):
                 logger.debug(f"Received event: {event}")
                 progress_time = event.progress_time_ms / 1000
                 asyncio.create_task(self.handle_adjust_progress(progress_time))
             elif isinstance(event, EventStop):
                 logger.warning("Song stopped!")
+                self.events_queue.task_done()
+            else:
+                self.events_queue.task_done()
 
             await asyncio.sleep(CONTROLLER_TICK)
 
@@ -72,6 +74,8 @@ class LightsController:
             logger.info(f"Moving to next bar: {current_bar}")
             self.last_bar = current_bar
             await self.set_device_state(current_duration, brightness, self.current_color)
+
+        self.events_queue.task_done()
 
     async def begin_color_transition(self, current_duration):
         self.current_color = get_new_color(self.current_color)
