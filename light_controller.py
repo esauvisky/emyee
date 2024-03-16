@@ -18,6 +18,7 @@ class LightsController:
         self.last_duration = 0
         self.last_bar = None
         self.current_section = None
+        self.analysis = None
 
     async def control_lights(self):
         event = EventStop()
@@ -26,18 +27,15 @@ class LightsController:
             if isinstance(event, EventSongChanged):
                 logger.debug("Song changed!")
                 self.handle_song_changed(event)
-                self.events_queue.task_done()
             elif isinstance(event, EventAdjustProgressTime):
-                logger.debug(f"Received event: {event}")
-                progress_time = event.progress_time_ms / 1000
-                asyncio.create_task(self.handle_adjust_progress(progress_time))
+                if self.analysis is not None:
+                    logger.debug(f"Received event: {event}")
+                    progress_time = event.progress_time_ms
+                    await self.handle_adjust_progress(progress_time)
             elif isinstance(event, EventStop):
                 logger.warning("Song stopped!")
-                self.events_queue.task_done()
-            else:
-                self.events_queue.task_done()
-
             await asyncio.sleep(CONTROLLER_TICK)
+            self.events_queue.task_done()
 
     def handle_song_changed(self, event):
         self.analysis = event.analysis
@@ -67,22 +65,22 @@ class LightsController:
         # logger.info(f"Checking if we need to move to the next section. {current_bar['start']} {current_duration} {self.current_section['start']} {self.current_section['duration']}")
         if self.current_section and current_bar['start'] + current_duration > self.current_section['start'] + self.current_section['duration']:
             logger.warning(f"Moving to next section: {self.current_section}")
-            self.current_section = get_next_item(self.sections, current_duration)
+            self.current_section = get_next_item(self.sections, current_bar['start'] + current_duration)
             await self.begin_color_transition(current_duration)
 
         if self.last_bar and self.last_bar != current_bar:
             logger.info(f"Moving to next bar: {current_bar}")
             self.last_bar = current_bar
+            if current_bar['confidence'] > 0.5:
+                await self.begin_color_transition(current_duration)
             await self.set_device_state(current_duration, brightness, self.current_color)
-
-        self.events_queue.task_done()
 
     async def begin_color_transition(self, current_duration):
         self.current_color = get_new_color(self.current_color)
         for device in self.devices:
             device.duration = int(current_duration * 1000)
             device.set_rgb(*self.current_color)
-        await asyncio.sleep(current_duration)
+        await asyncio.sleep(0)
 
     async def set_device_state(self, duration, brightness=None, color=None):
         for device in self.devices:
@@ -93,3 +91,4 @@ class LightsController:
             if color:
                 device.set_rgb(*color)
             self.last_duration = duration
+        await asyncio.sleep(0)

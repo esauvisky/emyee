@@ -22,7 +22,6 @@ class SpotifyChangesListener:
         self.current_progress = 0  # Initial progress in seconds
         self.last_api_update_time = 0
         self.last_progress = 0
-        self.last_track_id = 0
         self.headers = {}
         self.spotify_auth = SpotifyOAuth(client_id=client_id,
                                          client_secret=client_secret,
@@ -36,11 +35,10 @@ class SpotifyChangesListener:
         while True:
             await asyncio.sleep(SPOTIFY_CHANGES_LISTENER_DELAY)
             new_progress = self.current_progress + time.time() - self.last_api_update_time
-            if self.last_progress > new_progress and self.current_track_id == self.last_track_id:
+            if self.last_progress > new_progress and self.last_progress - new_progress < SPOTIFY_CHANGES_LISTENER_FAILURE_DELAY:
                 continue
             await self.events_queue.put(EventAdjustProgressTime(new_progress))
             self.last_progress = new_progress
-            self.last_track_id = self.current_track_id
 
     async def fetch_spotify_changes(self):
         access_token = prompt_for_user_token(
