@@ -73,6 +73,8 @@ class LightsController:
             self.last_bar = current_bar
             if current_bar['confidence'] > 0.5:
                 await self.begin_color_transition(current_duration)
+            else:
+                await self.set_device_state(current_duration, brightness)
             await self.set_device_state(current_duration, brightness, self.current_color)
 
     async def begin_color_transition(self, current_duration):
