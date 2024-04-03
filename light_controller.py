@@ -49,26 +49,27 @@ class LightsController:
         self.current_color = get_new_color(self.current_color)
 
     async def handle_adjust_progress(self, current_time):
-        current_beat = get_current_item(self.beats, current_time)
-        current_segment = get_current_item(self.segments, current_time)
+        next_beat = get_next_item(self.beats, current_time)
+        next_segment = get_next_item(self.segments, current_time)
         current_bar = get_current_item(self.bars, current_time)
-        if not current_beat or not current_segment or not current_bar:
+        if not next_beat or not next_segment or not current_bar:
             return
-        current_loudness = current_segment["loudness_start"]
+        next_loudness = next_segment["loudness_start"]
         current_duration = current_bar["duration"]
         # scale loudness to brightness by grabbing max and mins from the analysis and mapping current loudness to a range
         min_loudness = min(segment['loudness_start'] for segment in self.segments)
         max_loudness = max(segment['loudness_max'] for segment in self.segments)
-        brightness = int((current_loudness-min_loudness) / (max_loudness-min_loudness) * 100)
+        brightness = int((next_loudness-min_loudness) / (max_loudness-min_loudness) * 100)
 
         # Check if we need to move to the next section
         # logger.info(f"Checking if we need to move to the next section. {current_bar['start']} {current_duration} {self.current_section['start']} {self.current_section['duration']}")
         if self.current_section and current_bar['start'] + current_duration > self.current_section['start'] + self.current_section['duration']:
             logger.warning(f"Moving to next section: {self.current_section}")
+        if self.current_section and current_bar['start'] + current_duration > self.current_section['start'] + self.current_section['duration']:
             self.current_section = get_next_item(self.sections, current_bar['start'] + current_duration)
             await self.begin_color_transition(current_duration)
 
-        if self.last_bar and self.last_bar != current_bar:
+        if self.last_bar != current_bar or next_beat['start'] < current_time + CONTROLLER_TICK:
             logger.info(f"Moving to next bar: {current_bar}")
             self.last_bar = current_bar
             if current_bar['confidence'] > 0.5:
