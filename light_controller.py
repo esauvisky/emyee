@@ -52,9 +52,9 @@ class LightsController:
         next_beat = get_next_item(self.beats, current_time)
         next_segment = get_next_item(self.segments, current_time)
         current_bar = get_current_item(self.bars, current_time)
-        if not next_beat or not next_segment or not current_bar:
+        if not current_bar:
             return
-        next_loudness = next_segment["loudness_start"]
+        next_loudness = next_beat["loudness_start"]
         current_duration = current_bar["duration"]
         # scale loudness to brightness by grabbing max and mins from the analysis and mapping current loudness to a range
         min_loudness = min(segment['loudness_start'] for segment in self.segments)
@@ -67,16 +67,16 @@ class LightsController:
             logger.warning(f"Moving to next section: {self.current_section}")
         if self.current_section and current_bar['start'] + current_duration > self.current_section['start'] + self.current_section['duration']:
             self.current_section = get_next_item(self.sections, current_bar['start'] + current_duration)
-            await self.begin_color_transition(current_duration)
+            await self.begin_color_transition(current_bar['duration'])
 
-        if self.last_bar != current_bar or next_beat['start'] < current_time + CONTROLLER_TICK:
+        if self.last_bar != current_bar:
             logger.info(f"Moving to next bar: {current_bar}")
             self.last_bar = current_bar
             if current_bar['confidence'] > 0.5:
                 await self.begin_color_transition(current_duration)
-            else:
-                await self.set_device_state(current_duration, brightness)
-            await self.set_device_state(current_duration, brightness, self.current_color)
+                await self.begin_color_transition(current_bar['duration'])
+        elif next_beat['start'] < current_time + CONTROLLER_TICK:
+            await self.set_device_state(next_beat['duration'], brightness)
 
     async def begin_color_transition(self, current_duration):
         self.current_color = get_new_color(self.current_color)
