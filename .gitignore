@@ -14,3 +14,4 @@ MANIFEST
 .env
 .venv
 .cache-*
+.aider*

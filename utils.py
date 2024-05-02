@@ -14,48 +14,37 @@ SPOTIFY_CHANGES_LISTENER_FAILURE_DELAY = 1
 SPOTIFY_REDIRECT_URI = 'http://localhost:8000/'
 SPOTIFY_SCOPE = 'user-read-currently-playing,user-read-playback-state'
 API_REQUEST_INTERVAL = 0.5
-COLORS = [
-    (255, 0, 0),        # Red
-    (0, 255, 0),        # Green
-    (0, 0, 255),        # Blue
-    (255, 255, 0),      # Yellow
-    (0, 255, 255),      # Cyan
-    (255, 0, 255),      # Magenta
-    (128, 0, 0),        # Maroon
-    (128, 128, 0),      # Olive
-    (0, 128, 0),        # Dark Green
-    (128, 0, 128),      # Purple
-    (0, 128, 128),      # Teal
-    (0, 0, 128),        # Navy
-    (255, 165, 0),      # Orange
-    (255, 192, 203),    # Pink
-    (255, 215, 0),      # Gold
-    (75, 0, 130),       # Indigo
-    (240, 128, 128),    # Light Coral
-    (95, 158, 160),     # Cadet Blue
-]
+COLORS = [(255, 102, 129), (204, 0, 203), (232, 62, 62), (102, 0, 102), (0, 0, 204), (59, 0, 104), (0, 0, 102),
+          (0, 203, 204), (76, 126, 128), (0, 102, 102), (102, 102, 0), (204, 0, 0), (102, 0, 0), (203, 204, 0),
+          (204, 172, 0), (204, 132, 0), (0, 204, 0), (0, 102, 0)]
+
 
 def setup_logging(level="DEBUG", show_module=False):
     """
     Setups better log format for loguru.
     """
-    logger.remove()  # Remove the default logger
+    logger.remove()     # Remove the default logger
     log_fmt = "<green>{time:YYYY-MM-DD HH:mm:ss}</green> | <level>{level: <8}</level> | "
     log_fmt += "<cyan>{name}</cyan>:<cyan>{function}</cyan>:<cyan>{line}</cyan> - " if show_module else ""
     log_fmt += "<level>{message}</level>"
     logger.add(sys.stderr, level=level, format=log_fmt, colorize=True, backtrace=True, diagnose=True)
 
+
 def get_new_color(current_color):
     """
     Generates a new color, ensuring it is different from the current color.
     """
+    # index = COLORS.index(current_color)
+    # new_color = COLORS[(index+1) % len(COLORS)]
+
     colors = list(COLORS)
     if current_color in colors:
         colors.remove(current_color)  # Remove the current color to ensure the new color is different
     new_color = random.choice(colors)
-    # Optionally, adjust the new color slightly to add variety
-    adjusted_color = tuple(max(0, min(255, component + random.randint(-20, 20))) for component in new_color)
-    return adjusted_color
+    ## Optionally, adjust the new color slightly to add variety
+    # adjusted_color = tuple(max(0, min(255, component + random.randint(-20, 20))) for component in new_color)
+    return new_color
+
 
 async def get_current_playing(session: aiohttp.ClientSession, token: str) -> RawSpotifyResponse:
     """
@@ -65,6 +54,7 @@ async def get_current_playing(session: aiohttp.ClientSession, token: str) -> Raw
     url = 'https://api.spotify.com/v1/me/player/currently-playing'
     async with session.get(url, headers=headers) as response:
         return await response.json()
+
 
 async def get_audio_analysis(session: aiohttp.ClientSession, token: str, track_id: str) -> RawSpotifyResponse:
     """
@@ -140,10 +130,7 @@ def parse_audio_data_improved_with_check(data):
         section_num_next = find_section_number(next_bar['start'])
 
         result.append({
-            'start': current_bar['start'],
-            'duration': current_bar['duration'],
-            'loudness_next': average_loudness_next,
-            'section_num_next': section_num_next})
+            'start': current_bar['start'], 'duration': current_bar['duration'], 'loudness_next': average_loudness_next, 'section_num_next': section_num_next})
 
     return result
 
@@ -203,31 +190,35 @@ def parse_audio_data_improved(data):
 
         # Calcula a média da sonoridade para esses segmentos relevantes
         if relevant_segments:
-            average_loudness_current = round(sum(calculate_segment_loudness(segment)
-                                           for segment in relevant_segments) / len(relevant_segments))
+            average_loudness_current = round(
+                sum(calculate_segment_loudness(segment) for segment in relevant_segments) / len(relevant_segments))
             duration = sum(segment['duration'] for segment in relevant_segments)
         else:
             average_loudness_current = 0 # Assume 0 se não encontrar segmentos relevantes
             duration = 0
 
         # Determina a qual seção pertence o próximo
-        section_num_next = find_section_number(bars[i+1]['start'])
+        section_num_next = find_section_number(bars[i + 1]['start'])
 
         # Adiciona os resultados para o compasso atual ao resultado
         result.append({
-            'index': i,                           # O índice do compasso atual
-            'start': current_bar['start'],        # O tempo de início do compasso atual
-            'duration': duration,                 # O tempo de duração do compasso atual
+            'index': i,                                   # O índice do compasso atual
+            'start': current_bar['start'],                # O tempo de início do compasso atual
+            'duration': duration,                         # O tempo de duração do compasso atual
             'loudness_current': average_loudness_current, # A média da sonoridade dos segmentos que iniciam neste compasso
-            'section_num_next': section_num_next     # O número da seção do compasso atual
+            'section_num_next': section_num_next           # O número da seção do compasso atual
         })
 
     return result
+
+def get_random_item(items):
+    return random.choice(items)
 
 def get_next_item(items, current_time, key="start"):
     items_sorted_by_start = sorted(items, key=lambda x: x[key])
     remaining_items = [item for item in items_sorted_by_start if item[key] > current_time]
     return remaining_items[1] if len(remaining_items) > 1 else None
+
 
 def get_current_item(items, current_time, key="start"):
     items_sorted_by_start = sorted(items, key=lambda x: x[key])

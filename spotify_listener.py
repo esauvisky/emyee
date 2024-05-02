@@ -3,12 +3,11 @@ import aiohttp
 import time
 import sys
 from spotipy.oauth2 import SpotifyOAuth
-from app import CONTROLLER_TICK, SPOTIFY_SCOPE
 from models import EventSongChanged, EventAdjustProgressTime, EventStop
 from loguru import logger
 from spotipy.util import prompt_for_user_token
 
-from utils import API_REQUEST_INTERVAL, API_AUDIO_ANALYSIS, API_CURRENT_PLAYING
+from utils import API_REQUEST_INTERVAL, API_AUDIO_ANALYSIS, API_CURRENT_PLAYING, CONTROLLER_TICK, SPOTIFY_SCOPE
 from utils import SPOTIFY_CHANGES_LISTENER_DELAY, SPOTIFY_CHANGES_LISTENER_FAILURE_DELAY, SPOTIFY_REDIRECT_URI
 
 
