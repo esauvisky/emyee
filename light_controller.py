@@ -6,6 +6,7 @@ from loguru import logger
 from models import EventSongChanged, EventAdjustProgressTime, EventStop
 from utils import get_current_item, get_new_color, COLORS, get_next_item, map_loudness_to_brightness, CONTROLLER_TICK
 import random
+import numpy as np
 
 
 class LightsController:
@@ -14,13 +15,14 @@ class LightsController:
         self.events_queue = events_queue
         self.last_section_num_next = 0
         self.last_index = -1 # Initialize to -1 to ensure the first index is processed
-        self.current_color = random.choice(COLORS)
+        self.current_hue = random.randint(0, 359)
+        self.current_saturation = random.randint(50, 80)
+        self.current_brightness = 0
         self.sections = []   # List of song sections
-        self.last_bar = None
+        self.last_bar = {}
         self.current_section = None
         self.analysis = None
         self.current_progress = 0
-        self.lock = asyncio.Lock()
 
     async def control_lights(self):
         event = EventStop()
