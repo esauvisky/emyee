@@ -1,3 +1,4 @@
+from typing import List
 from yeelight import discover_bulbs, Bulb
 from loguru import logger
 
@@ -12,7 +13,7 @@ class DeviceManager:
         self.effect = effect
         self.auto_on = auto_on
 
-    def discover_devices(self):
+    def discover_devices(self) -> List[Bulb]:
         """
         Discovers Yeelight bulbs on the local network.
 
