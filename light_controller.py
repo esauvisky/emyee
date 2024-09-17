@@ -1,19 +1,25 @@
 import asyncio
 import time
-from yeelight import Bulb
-from tqdm.auto import tqdm
-from typing import AsyncIterable, List
+from typing import List
 from dotenv import load_dotenv
 from loguru import logger
 from models import EventSongChanged, EventAdjustProgressTime, EventStop
-from utils import get_current_item, get_new_color, COLORS, get_next_item, map_loudness_to_brightness, CONTROLLER_TICK
+from utils import (
+    get_current_item,
+    get_new_color,
+    COLORS,
+    get_next_item,
+    map_loudness_to_brightness,
+    CONTROLLER_TICK
+)
 import random
 import numpy as np
 
+from light_device import LightDevice  # Import the LightDevice class
 
 class LightsController:
-    def __init__(self, devices, events_queue: asyncio.Queue):
-        self.devices: List[Bulb] = devices
+    def __init__(self, devices: List[LightDevice], events_queue: asyncio.Queue):
+        self.devices = devices
         self.events_queue = events_queue
         self.last_section_num_next = 0
         self.last_index = -1  # Initialize to -1 to ensure the first index is processed
@@ -47,10 +53,10 @@ class LightsController:
                     await self.handle_adjust_progress(self.current_progress)
             elif isinstance(event, EventStop):
                 logger.warning("Song stopped!")
-            await asyncio.sleep(CONTROLLER_TICK)
             self.events_queue.task_done()
+            await asyncio.sleep(CONTROLLER_TICK)
 
-    def handle_song_changed(self, event):
+    def handle_song_changed(self, event: EventSongChanged):
         self.analysis = event.analysis
         self.sections = self.analysis['sections']
         self.segments = self.analysis['segments']
@@ -130,12 +136,19 @@ class LightsController:
 
         logger.info(f"Setting parameters: duration={duration:.2f}s, brightness={new_brightness}%, hue={new_hue}, saturation={new_saturation}")
 
-        # Apply settings to devices
+        # Apply settings to devices using LightDevice's asynchronous methods
+        set_tasks = []
         for device in self.devices:
-            device.duration = int(duration * 1000)
-            if device.model == "ct_bulb":
-                device.set_brightness(new_brightness, duration=duration * 1000)
+            if device.bulb.model == "ct_bulb":
+                set_tasks.append(device.set_brightness(new_brightness, duration=duration))
             else:
-                device.set_hsv(new_hue, new_saturation, new_brightness, duration=duration * 1000)
+                if change_color:
+                    set_tasks.append(device.set_hsv(new_hue, new_saturation, new_brightness, duration=duration))
+                elif brightness is not None:
+                    set_tasks.append(device.set_brightness(new_brightness, duration=duration))
 
-        await asyncio.sleep(duration - CONTROLLER_TICK)
+        # Execute all state changes concurrently
+        await asyncio.gather(*set_tasks)
+
+        # Optionally, wait for the duration minus the controller tick
+        await asyncio.sleep(0)
