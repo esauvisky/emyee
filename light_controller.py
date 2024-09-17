@@ -1,7 +1,8 @@
 import asyncio
 import time
+from yeelight import Bulb
 from tqdm.auto import tqdm
-from typing import AsyncIterable
+from typing import AsyncIterable, List
 from dotenv import load_dotenv
 from loguru import logger
 from models import EventSongChanged, EventAdjustProgressTime, EventStop
@@ -12,10 +13,10 @@ import numpy as np
 
 class LightsController:
     def __init__(self, devices, events_queue: asyncio.Queue):
-        self.devices = devices
+        self.devices: List[Bulb] = devices
         self.events_queue = events_queue
         self.last_section_num_next = 0
-        self.last_index = -1 # Initialize to -1 to ensure the first index is processed
+        self.last_index = -1  # Initialize to -1 to ensure the first index is processed
         self.current_hue = random.randint(0, 359)
         self.current_saturation = random.randint(50, 80)
         self.current_brightness = 0

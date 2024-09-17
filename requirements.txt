@@ -3,3 +3,15 @@ aiohttp
 yeelight
 bottle
 pyaml
+python-dotenv==1.0.1
+loguru==0.7.2
+numpy
+lapack-lite
+dragon4
+libdivide
+Meson
+spin
+OpenBLAS
+LAPACK
+GCC
+libquadmath==2.1.1
