@@ -9,8 +9,8 @@ from utils import (
     get_new_color,
     COLORS,
     get_next_item,
-    map_loudness_to_brightness,
-    CONTROLLER_TICK
+    CONTROLLER_TICK,
+    merge_short_segments_recursive
 )
 import random
 import numpy as np
@@ -59,12 +59,11 @@ class LightsController:
     def handle_song_changed(self, event: EventSongChanged):
         self.analysis = event.analysis
         self.sections = self.analysis['sections']
-        self.segments = self.analysis['segments']
+        self.segments = merge_short_segments_recursive(self.analysis['segments'])
         self.bars = self.analysis['bars']
         self.last_bar = self.bars[0]
         self.current_section = self.sections[0]
         self.beats = self.analysis['beats']
-        self.mapped = map_loudness_to_brightness(event.analysis)
 
     def map_brightness(self, segment):
         decibel_to_linear = lambda x: 10**(x / 20)
