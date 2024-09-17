@@ -18,7 +18,7 @@ def main():
     device_manager = DeviceManager()
     devices = device_manager.discover_devices()
 
-    events_queue = asyncio.Queue(1)
+    events_queue = asyncio.Queue()
 
     spotify_listener = SpotifyChangesListener(user_id, client_id, client_secret, events_queue)
     light_controller = LightsController(devices, events_queue)

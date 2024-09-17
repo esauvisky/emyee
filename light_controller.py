@@ -84,10 +84,10 @@ class LightsController:
         max_loudness = max(filtered_loudness_values)
         brightness = int((next_loudness - min_loudness) / (max_loudness - min_loudness) * 50)
 
-        logger.trace(f"Segment loudness: {next_loudness:.5f} (min: {min_loudness:.2f}, max: {max_loudness:.2f})")
+        # logger.trace(f"Segment loudness: {next_loudness:.5f} (min: {min_loudness:.2f}, max: {max_loudness:.2f})")
         return brightness
 
-    async def handle_adjust_progress(self, current_time):
+    async def handle_adjust_progress(self, current_time: float):
         next_segment = get_next_item(self.segments, current_time)
         current_bar = get_current_item(self.bars, current_time)
         if not next_segment or not current_bar:
@@ -95,14 +95,8 @@ class LightsController:
         current_bar_duration = current_bar["duration"] - (current_time - current_bar['start'])
         brightness = self.map_brightness(next_segment)
 
-        ## Check if we need to move to the next section
-        # if self.current_section and current_bar['start'] + current_bar_duration > self.current_section['start'] + self.current_section['duration']:
-        #     logger.warning(f"Moving to next section: {self.current_section}")
-        #     self.current_section = get_next_item(self.sections, current_bar['start'] + current_bar_duration)
-        #     asyncio.create_task(self.set_parameters(current_bar_duration, change_color=True))
-
         # Check if we need to move to the next bar
-        if self.last_bar != current_bar and current_bar['confidence'] > 0.2:
+        if self.last_bar != current_bar and current_bar['confidence'] > 0.8:
             logger.warning(f"Transitioning from bar {self.bars.index(self.last_bar)} to bar {self.bars.index(current_bar)} in {current_bar_duration:.2f}s")
             asyncio.create_task(self.set_parameters(current_bar_duration, change_color=True))
             self.last_bar = current_bar
@@ -110,7 +104,7 @@ class LightsController:
         elif next_segment['start']:
             asyncio.create_task(self.set_parameters(next_segment['duration'], brightness=brightness))
 
-    async def set_parameters(self, duration=0.05, brightness=None, change_color=False):
+    async def set_parameters(self, duration: float = 0.05, brightness: int | None = None, change_color: bool = False):
         # Determine new parameters
         new_hue = random.randint(0, 359) if change_color else self._current_params['hue']
         new_saturation = random.randint(50, 80) if change_color else self._current_params['saturation']
@@ -131,7 +125,7 @@ class LightsController:
         if change_color:
             self._current_params['hue'] = new_hue
             self._current_params['saturation'] = new_saturation
-        if brightness is not None:
+        elif brightness is not None:
             self._current_params['brightness'] = new_brightness
 
         logger.info(f"Setting parameters: duration={duration:.2f}s, brightness={new_brightness}%, hue={new_hue}, saturation={new_saturation}")
