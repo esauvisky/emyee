@@ -28,10 +28,10 @@ class DeviceManager:
 
             try:
                 bulb = Bulb(ip, port, effect=self.effect, auto_on=self.auto_on)
-                if bulb.get_capabilities()["model"] != "ct_bulb":
-                    bulb.start_music()
-                    devices.append(bulb)
-                    logger.info(f"Initialized bulb at {ip}:{port}")
+                # if bulb.get_capabilities()["model"] != "ct_bulb":
+                bulb.start_music()
+                devices.append(bulb)
+                logger.info(f"Initialized bulb at {ip}:{port}")
             except Exception as e:
                 logger.error(f"Failed to initialize bulb at {ip}:{port}: {e}")
 
