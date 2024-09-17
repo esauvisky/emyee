@@ -13,11 +13,11 @@ class DeviceManager:
         self.effect = effect
         self.auto_on = auto_on
 
-    def discover_devices(self) -> List[Bulb]:
+    def discover_devices(self) -> List[LightDevice]:
         """
         Discovers Yeelight bulbs on the local network.
 
-        :return: A list of initialized Bulb objects ready for use.
+        :return: A list of initialized LightDevice objects ready for use.
         """
         logger.info("Discovering bulbs...")
         bulbs_info = discover_bulbs()
@@ -29,12 +29,13 @@ class DeviceManager:
 
             try:
                 bulb = Bulb(ip, port, effect=self.effect, auto_on=self.auto_on)
-                # if bulb.get_capabilities()["model"] != "ct_bulb":
+                # Initialize LightDevice with the Bulb instance
+                light_device = LightDevice(bulb)
                 bulb.start_music()
-                devices.append(bulb)
-                logger.info(f"Initialized bulb at {ip}:{port}")
+                devices.append(light_device)
+                logger.info(f"Initialized LightDevice at {ip}:{port}")
             except Exception as e:
                 logger.error(f"Failed to initialize bulb at {ip}:{port}: {e}")
 
-        logger.info(f"Found and initialized {len(devices)} bulbs.")
+        logger.info(f"Found and initialized {len(devices)} LightDevice(s).")
         return devices
