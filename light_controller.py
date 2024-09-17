@@ -26,6 +26,13 @@ class LightsController:
         self.analysis = None
         self.current_progress = 0
 
+        # Initialize current parameters for comparison
+        self._current_params = {
+            'hue': self.current_hue,
+            'saturation': self.current_saturation,
+            'brightness': self.current_brightness
+        }
+
     async def control_lights(self):
         event = EventStop()
         while True:
@@ -97,26 +104,38 @@ class LightsController:
         elif next_segment['start']:
             asyncio.create_task(self.set_parameters(next_segment['duration'], brightness=brightness))
 
-
     async def set_parameters(self, duration=0.05, brightness=None, change_color=False):
-        hue = random.randint(0, 359) if change_color else self.current_hue
-        saturation = random.randint(50, 80) if change_color else self.current_saturation
-        brightness = None if brightness is None or brightness == self.current_brightness else brightness
+        # Determine new parameters
+        new_hue = random.randint(0, 359) if change_color else self._current_params['hue']
+        new_saturation = random.randint(50, 80) if change_color else self._current_params['saturation']
+        new_brightness = brightness if brightness is not None else self._current_params['brightness']
 
+        # Check if any parameter has changed
+        params_changed = (
+            new_hue != self._current_params['hue'] or
+            new_saturation != self._current_params['saturation'] or
+            new_brightness != self._current_params['brightness']
+        )
+
+        if not params_changed:
+            # logger.trace("No parameter changes detected. Skipping set_parameters to prevent blinking.")
+            return
+
+        # Update current parameters
         if change_color:
-            logger.warning(f"Setting parameters: duration={duration:.2f}s, brightness={brightness}%, hue={hue}, saturation={saturation}")
-            self.current_hue = hue
-            self.current_saturation = saturation
-            for device in self.devices:
-                device.duration = duration * 1000
-                if device.model != "ct_bulb":
-                    device.set_hsv(hue, saturation, brightness, duration=duration * 1000)
-        elif brightness is not None:
-            logger.info(f"Setting parameters: duration={duration:.2f}s, brightness={brightness}%, hue={hue}, saturation={saturation}")
-            for device in self.devices:
-                device.duration = duration * 1000
-                if device.model != "ct_bulb":
-                    device.set_hsv(self.current_hue, self.current_saturation, brightness, duration=duration * 1000)
+            self._current_params['hue'] = new_hue
+            self._current_params['saturation'] = new_saturation
+        if brightness is not None:
+            self._current_params['brightness'] = new_brightness
 
-        await asyncio.sleep(CONTROLLER_TICK)
+        logger.info(f"Setting parameters: duration={duration:.2f}s, brightness={new_brightness}%, hue={new_hue}, saturation={new_saturation}")
 
+        # Apply settings to devices
+        for device in self.devices:
+            device.duration = int(duration * 1000)
+            if device.model == "ct_bulb":
+                device.set_brightness(new_brightness, duration=duration * 1000)
+            else:
+                device.set_hsv(new_hue, new_saturation, new_brightness, duration=duration * 1000)
+
+        await asyncio.sleep(duration - CONTROLLER_TICK)
