@@ -1,5 +1,6 @@
 import asyncio
 import time
+from tqdm.auto import tqdm
 from typing import AsyncIterable
 from dotenv import load_dotenv
 from loguru import logger
@@ -51,9 +52,9 @@ class LightsController:
         self.beats = self.analysis['beats']
         self.mapped = map_loudness_to_brightness(event.analysis)
 
-    def map_brightness(self, next_segment):
+    def map_brightness(self, segment):
         decibel_to_linear = lambda x: 10**(x / 20)
-        next_loudness = decibel_to_linear(next_segment["loudness_start"])
+        next_loudness = decibel_to_linear(segment["loudness_start"])
 
         # Calculate mean and standard deviation of loudness values
         loudness_values = [decibel_to_linear(segment['loudness_start']) for segment in self.segments]
@@ -69,7 +70,7 @@ class LightsController:
         max_loudness = max(filtered_loudness_values)
         brightness = int((next_loudness-min_loudness) / (max_loudness-min_loudness) * 50)
 
-        logger.trace(f"Next segment loudness: {next_loudness:.5f} (min: {min_loudness:.2f}, max: {max_loudness:.2f})")
+        logger.trace(f"Segment loudness: {next_loudness:.5f} (min: {min_loudness:.2f}, max: {max_loudness:.2f})")
         return brightness
 
     async def handle_adjust_progress(self, current_time):
@@ -87,13 +88,13 @@ class LightsController:
         #     asyncio.create_task(self.set_parameters(current_bar_duration, change_color=True))
 
         # Check if we need to move to the next bar
-        if self.last_bar != current_bar and current_bar['confidence'] > 0.6:
+        if self.last_bar != current_bar and current_bar['confidence'] > 0.2:
             logger.warning(f"Transitioning from bar {self.bars.index(self.last_bar)} to bar {self.bars.index(current_bar)} in {current_bar_duration:.2f}s")
-            await self.set_parameters(current_bar_duration, change_color=True)
+            asyncio.create_task(self.set_parameters(current_bar_duration, change_color=True))
             self.last_bar = current_bar
         # Check if we need to move to the next segment
         elif next_segment['start']:
-            await self.set_parameters(next_segment['duration'], brightness=brightness)
+            asyncio.create_task(self.set_parameters(next_segment['duration'], brightness=brightness))
 
 
     async def set_parameters(self, duration=0.05, brightness=None, change_color=False):
@@ -107,11 +108,14 @@ class LightsController:
             self.current_saturation = saturation
             for device in self.devices:
                 device.duration = duration * 1000
-                device.set_hsv(hue, saturation, brightness, duration=duration * 1000)
-            await asyncio.sleep(duration)
+                if device.model != "ct_bulb":
+                    device.set_hsv(hue, saturation, brightness, duration=duration * 1000)
         elif brightness is not None:
             logger.info(f"Setting parameters: duration={duration:.2f}s, brightness={brightness}%, hue={hue}, saturation={saturation}")
             for device in self.devices:
                 device.duration = duration * 1000
-                device.set_hsv(self.current_hue, self.current_saturation, brightness, duration=duration * 1000)
+                if device.model != "ct_bulb":
+                    device.set_hsv(self.current_hue, self.current_saturation, brightness, duration=duration * 1000)
+
+        await asyncio.sleep(CONTROLLER_TICK)
 

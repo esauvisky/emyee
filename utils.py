@@ -6,10 +6,10 @@ from typing import Dict, Any
 
 # Define a type alias for Spotify's raw response for clarity
 RawSpotifyResponse = Dict[str, Any]
-CONTROLLER_TICK = 0.01
+CONTROLLER_TICK = 0.001
 API_CURRENT_PLAYING = 'https://api.spotify.com/v1/me/player/currently-playing'
 API_AUDIO_ANALYSIS = 'https://api.spotify.com/v1/audio-analysis/'
-SPOTIFY_CHANGES_LISTENER_DELAY = 0.1
+SPOTIFY_CHANGES_LISTENER_DELAY = 0.001
 SPOTIFY_CHANGES_LISTENER_FAILURE_DELAY = 1
 SPOTIFY_REDIRECT_URI = 'http://localhost:8000/'
 SPOTIFY_SCOPE = 'user-read-currently-playing,user-read-playback-state'
@@ -18,17 +18,35 @@ COLORS = [(255, 102, 129), (204, 0, 203), (232, 62, 62), (102, 0, 102), (0, 0, 2
           (0, 203, 204), (76, 126, 128), (0, 102, 102), (102, 102, 0), (204, 0, 0), (102, 0, 0), (203, 204, 0),
           (204, 172, 0), (204, 132, 0), (0, 204, 0), (0, 102, 0)]
 
+def setup_logging(log_lvl="DEBUG", options={}):
+    file = options.get("file", False)
+    function = options.get("function", False)
+    process = options.get("process", False)
+    thread = options.get("thread", False)
 
-def setup_logging(level="DEBUG", show_module=False):
-    """
-    Setups better log format for loguru.
-    """
-    logger.remove()     # Remove the default logger
-    log_fmt = "<green>{time:YYYY-MM-DD HH:mm:ss}</green> | <level>{level: <8}</level> | "
-    log_fmt += "<cyan>{name}</cyan>:<cyan>{function}</cyan>:<cyan>{line}</cyan> - " if show_module else ""
-    log_fmt += "<level>{message}</level>"
-    logger.add(sys.stderr, level=level, format=log_fmt, colorize=True, backtrace=True, diagnose=True)
+    log_fmt = (u"<n><d><level>{time:HH:mm:ss.SSS} | " +
+               f"{'{file:>15.15}' if file else ''}" +
+               f"{'{function:>15.15}' if function else ''}" +
+               f"{':{line:<4} | ' if file or function else ''}" +
+               f"{'{process.name:>12.12} | ' if process else ''}" +
+               f"{'{thread.name:<11.11} | ' if thread else ''}" +
+               u"{level:1.1} | </level></d></n><level>{message}</level>")
 
+    logger.configure(
+        handlers=[{
+            "sink": lambda x: print(x, end=""),
+            "level": log_lvl,
+            "format": log_fmt,
+            "colorize": True,
+            "backtrace": True,
+            "diagnose": True
+        }],
+        levels=[
+            {"name": "TRACE", "color": "<white><dim>"},
+            {"name": "DEBUG", "color": "<cyan><dim>"},
+            {"name": "INFO", "color": "<white>"}
+        ]
+    )  # type: ignore # yapf: disable
 
 def get_new_color(current_color):
     """
