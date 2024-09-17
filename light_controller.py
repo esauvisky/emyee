@@ -65,18 +65,18 @@ class LightsController:
         next_loudness = decibel_to_linear(segment["loudness_start"])
 
         # Calculate mean and standard deviation of loudness values
-        loudness_values = [decibel_to_linear(segment['loudness_start']) for segment in self.segments]
+        loudness_values = [decibel_to_linear(seg['loudness_start']) for seg in self.segments]
         mean_loudness = np.mean(loudness_values)
         std_dev_loudness = np.std(loudness_values)
 
         # Define the range within which to consider values
-        lower_bound = mean_loudness - 2*std_dev_loudness
-        upper_bound = mean_loudness + 2*std_dev_loudness
+        lower_bound = mean_loudness - 2 * std_dev_loudness
+        upper_bound = mean_loudness + 2 * std_dev_loudness
         filtered_loudness_values = [loudness for loudness in loudness_values if lower_bound <= loudness <= upper_bound]
 
         min_loudness = min(filtered_loudness_values)
         max_loudness = max(filtered_loudness_values)
-        brightness = int((next_loudness-min_loudness) / (max_loudness-min_loudness) * 50)
+        brightness = int((next_loudness - min_loudness) / (max_loudness - min_loudness) * 50)
 
         logger.trace(f"Segment loudness: {next_loudness:.5f} (min: {min_loudness:.2f}, max: {max_loudness:.2f})")
         return brightness
