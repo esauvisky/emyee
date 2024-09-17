@@ -1,6 +1,7 @@
 from typing import List
 from yeelight import discover_bulbs, Bulb
 from loguru import logger
+from light_device import LightDevice  # Import the new LightDevice class
 
 class DeviceManager:
     def __init__(self, effect="smooth", auto_on=False):
