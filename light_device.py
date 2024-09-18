@@ -42,6 +42,7 @@ class LightDevice:
         except Exception as e:
             logger.error(f"Failed to set brightness for {self.ip}: {e}")
         finally:
+            await asyncio.sleep(CONTROLLER_TICK)  # Adjust sleep as needed
             self.lock.release()
 
     async def set_hsv(self, hue: int, saturation: int, brightness: int, duration: float = 0.05):
@@ -73,7 +74,6 @@ class LightDevice:
             await asyncio.to_thread(
                 self.bulb.set_hsv, hue, saturation, brightness, duration=int(duration * 1000)
             )
-            await asyncio.sleep(max(duration - CONTROLLER_TICK * 2, 0))  # Adjust sleep as needed
             logger.trace(f"HSV set to ({hue}, {saturation}, {brightness}) for {self.ip}")
         except asyncio.CancelledError:
             logger.trace(f"HSV change task was cancelled for {self.ip}.")
@@ -81,6 +81,7 @@ class LightDevice:
         except Exception as e:
             logger.error(f"Failed to set HSV for {self.ip}: {e}")
         finally:
+            await asyncio.sleep(CONTROLLER_TICK)  # Adjust sleep as needed
             self.lock.release()
 
     async def turn_on(self, duration: float = 0.05):

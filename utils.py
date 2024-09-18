@@ -19,6 +19,28 @@ COLORS = [(255, 102, 129), (204, 0, 203), (232, 62, 62), (102, 0, 102), (0, 0, 2
           (0, 203, 204), (76, 126, 128), (0, 102, 102), (102, 102, 0), (204, 0, 0), (102, 0, 0), (203, 204, 0),
           (204, 172, 0), (204, 132, 0), (0, 204, 0), (0, 102, 0)]
 
+# Define a vibrant color palette (Hue, Saturation)
+VIBRANT_COLOR_PALETTE = [
+    (0, 80),    # Red
+    (30, 80),   # Orange
+    (60, 80),   # Yellow
+    (120, 80),  # Green
+    (180, 80),  # Cyan
+    (220, 80),  # Blue
+    (300, 80),  # Magenta
+]
+
+
+
+def get_vibrant_color(current_hue):
+    palette = VIBRANT_COLOR_PALETTE.copy()
+    palette = [color for color in palette if abs(color[0] - current_hue) >= 30]
+    if not palette:
+        palette = VIBRANT_COLOR_PALETTE  # Reset if no colors are sufficiently different
+    new_color = random.choice(palette)
+    return new_color
+
+
 def setup_logging(log_lvl="DEBUG", options={}):
     file = options.get("file", False)
     function = options.get("function", False)

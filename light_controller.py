@@ -10,6 +10,7 @@ from utils import (
     COLORS,
     get_next_item,
     CONTROLLER_TICK,
+    get_vibrant_color,
     merge_short_segments,
     visualize_segments
 )
@@ -110,8 +111,12 @@ class LightsController:
 
     async def set_parameters(self, duration: float = 0.05, brightness: int | None = None, change_color: bool = False):
         # Determine new parameters
-        new_hue = random.randint(0, 359) if change_color else self._current_params['hue']
-        new_saturation = random.randint(50, 80) if change_color else self._current_params['saturation']
+        if change_color:
+            new_hue, new_saturation = get_vibrant_color(self._current_params['hue'])
+        else:
+            new_hue = self._current_params['hue']
+            new_saturation = self._current_params['saturation']
+
         new_brightness = brightness if brightness is not None else self._current_params['brightness']
 
         # Check if any parameter has changed
@@ -121,7 +126,7 @@ class LightsController:
             new_brightness != self._current_params['brightness']
         )
 
-        if not params_changed:
+        if not params_changed or (not change_color and brightness is None):
             # logger.trace("No parameter changes detected. Skipping set_parameters to prevent blinking.")
             return
 
@@ -131,6 +136,9 @@ class LightsController:
             self._current_params['saturation'] = new_saturation
         elif brightness is not None:
             self._current_params['brightness'] = new_brightness
+        else:
+            logger.debug("No parameter changes detected. Skipping set_parameters to prevent blinking.")
+            return
 
         logger.info(f"Setting parameters: duration={duration:.2f}s, brightness={new_brightness}%, hue={new_hue}, saturation={new_saturation}")
 
@@ -138,6 +146,7 @@ class LightsController:
         set_tasks = []
         for device in self.devices:
             if device.bulb.model == "ct_bulb":
+                logger.info(f"Setting parameters: duration={duration:.2f}s, brightness={new_brightness}%")
                 set_tasks.append(device.set_brightness(new_brightness, duration=duration))
             else:
                 if change_color:
