@@ -116,13 +116,13 @@ def calculate_segment_loudness(segment: Dict[str, Any]) -> float:
     average_loudness = (loudness_start + loudness_max) / 2
     return average_loudness
 
-def merge_short_segments_recursive(segments: List[Dict[str, Any]], min_duration: float = MIN_SEGMENT_DURATION) -> List[Dict[str, Any]]:
+def merge_short_segments(segments: List[Dict[str, Any]], min_duration: float = MIN_SEGMENT_DURATION) -> List[Dict[str, Any]]:
     """
-    Recursively merges consecutive segments until all segments meet the minimum duration.
+    Merges consecutive segments whose total duration is less than min_duration.
 
-    :param segments: List of segment dictionaries.
+    :param segments: List of segment dictionaries from Spotify's audio analysis.
     :param min_duration: Minimum duration for a segment in seconds.
-    :return: Merged list of segments.
+    :return: New list of segments with short segments merged.
     """
     if not segments:
         return []
@@ -131,31 +131,122 @@ def merge_short_segments_recursive(segments: List[Dict[str, Any]], min_duration:
     current_segment = segments[0].copy()
 
     for next_segment in segments[1:]:
+        # Check if the current segment is below the minimum duration
         if current_segment['duration'] < min_duration:
             # Merge with the next segment
             current_segment['duration'] += next_segment['duration']
+            # Optionally, update loudness attributes by averaging or other logic
             current_segment['loudness_start'] = (current_segment['loudness_start'] + next_segment['loudness_start']) / 2
             current_segment['loudness_max'] = max(current_segment['loudness_max'], next_segment.get('loudness_max', current_segment['loudness_max']))
             current_segment['loudness_end'] = next_segment.get('loudness_end', current_segment['loudness_end'])
-            current_segment['pitches'] = [
-                (c + n) / 2 for c, n in zip(current_segment['pitches'], next_segment['pitches'])
-            ]
-            current_segment['timbre'] = [
-                (c + n) / 2 for c, n in zip(current_segment['timbre'], next_segment['timbre'])
-            ]
+            # Update other attributes as needed (pitches, timbre, etc.)
+            current_segment['pitches'] = [(c + n) / 2 for c, n in zip(current_segment['pitches'], next_segment['pitches'])]
+            current_segment['timbre'] = [(c + n) / 2 for c, n in zip(current_segment['timbre'], next_segment['timbre'])]
+            # Continue merging if still below min_duration
         else:
             merged_segments.append(current_segment)
             current_segment = next_segment.copy()
 
+    # Append the last segment
     merged_segments.append(current_segment)
 
-    # Check if any merged segments are still below the threshold
-    if any(seg['duration'] < min_duration for seg in merged_segments):
-        if len(merged_segments) == 1:
-            # Only one segment left, cannot merge further
-            return merged_segments
+    return merged_segments
+
+
+def visualize_segments(segments: List[float]):
+
+    import matplotlib.pyplot as plt
+    import seaborn as sns
+    import pandas as pd
+    # Convert to DataFrame
+    df_segments = pd.DataFrame(segments)
+
+
+    # Extract durations
+    durations = df_segments['duration']
+    # Set plot style
+    sns.set(style="whitegrid")
+
+    # Plot histogram
+    plt.figure(figsize=(10, 6))
+    sns.histplot(durations, bins=50, kde=True)
+    plt.title('Distribution of Segment Durations')
+    plt.xlabel('Duration (seconds)')
+    plt.ylabel('Frequency')
+    plt.show()
+    # Calculate basic statistics
+    mean_duration = durations.mean()
+    median_duration = durations.median()
+    std_duration = durations.std()
+    min_duration = durations.min()
+    max_duration = durations.max()
+
+    print(f"Mean Duration: {mean_duration:.4f} seconds")
+    print(f"Median Duration: {median_duration:.4f} seconds")
+    print(f"Standard Deviation: {std_duration:.4f} seconds")
+    print(f"Min Duration: {min_duration:.4f} seconds")
+    print(f"Max Duration: {max_duration:.4f} seconds")
+    # Calculate percentiles
+    percentiles = [10, 25, 50, 75, 90]
+    percentile_values = durations.quantile([p/100 for p in percentiles])
+
+    print("Percentile Durations:")
+    for p, value in zip(percentiles, percentile_values):
+        print(f"{p}th percentile: {value:.4f} seconds")
+    # Calculate percentiles
+    percentiles = [10, 25, 50, 75, 90]
+    percentile_values = durations.quantile([p/100 for p in percentiles])
+
+    print("Percentile Durations:")
+    for p, value in zip(percentiles, percentile_values):
+        print(f"{p}th percentile: {value:.4f} seconds")
+    # Define outlier threshold (e.g., below 5th percentile)
+    outlier_threshold = durations.quantile(0.05)
+    print(f"Outlier Threshold (5th percentile): {outlier_threshold:.4f} seconds")
+
+    # Count outliers
+    outliers = durations[durations < outlier_threshold]
+    print(f"Number of Outliers: {len(outliers)}")
+
+    min_segment_duration = durations.quantile(0.25)
+    print(f"Optimal MIN_SEGMENT_DURATION set to 25th percentile: {min_segment_duration:.4f} seconds")
+
+    min_segment_duration = max(mean_duration - std_duration, 0.1)  # Ensure it's not negative
+    print(f"Optimal MIN_SEGMENT_DURATION set to Mean - Std Dev: {min_segment_duration:.4f} seconds")
+
+    from sklearn.cluster import KMeans
+    import numpy as np
+
+    # Reshape data for clustering
+    X = durations.values.reshape(-1, 1)
+
+    # Apply K-Means with 2 clusters
+    kmeans = KMeans(n_clusters=2, random_state=42).fit(X)
+
+    # Identify which cluster is shorter
+    cluster_centers = kmeans.cluster_centers_.flatten()
+    short_cluster = cluster_centers.argmin()
+    min_segment_duration = X[kmeans.labels_ == short_cluster].max()  # Maximum duration in short cluster
+
+    print(f"Optimal MIN_SEGMENT_DURATION set using K-Means: {min_segment_duration:.4f} seconds")
+
+    def dynamic_min_segment_duration(recent_durations, window_size=100, multiplier=1.0):
+        """
+        Calculates a dynamic MIN_SEGMENT_DURATION based on the moving average of recent durations.
+
+        :param recent_durations: List or array of recent segment durations.
+        :param window_size: Number of recent durations to consider.
+        :param multiplier: Multiplier to adjust the threshold.
+        :return: Calculated MIN_SEGMENT_DURATION.
+        """
+        if len(recent_durations) < window_size:
+            window = recent_durations
         else:
-            # Merge again recursively
-            return merge_short_segments_recursive(merged_segments, min_duration)
-    else:
-        return merged_segments
+            window = recent_durations[-window_size:]
+        moving_avg = np.mean(window)
+        return moving_avg * multiplier
+
+    # Example usage
+    recent_durations = durations.tolist()  # Or maintain a separate list for recent durations
+    min_segment_duration = dynamic_min_segment_duration(recent_durations, window_size=100, multiplier=0.8)
+    print(f"Dynamic MIN_SEGMENT_DURATION: {min_segment_duration:.4f} seconds")

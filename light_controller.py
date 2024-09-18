@@ -10,7 +10,8 @@ from utils import (
     COLORS,
     get_next_item,
     CONTROLLER_TICK,
-    merge_short_segments_recursive
+    merge_short_segments,
+    visualize_segments
 )
 import random
 import numpy as np
@@ -28,6 +29,7 @@ class LightsController:
         self.current_brightness = 0
         self.sections = []   # List of song sections
         self.last_bar = {}
+        self.last_next_segment = None
         self.current_section = None
         self.analysis = None
         self.current_progress = 0
@@ -59,7 +61,8 @@ class LightsController:
     def handle_song_changed(self, event: EventSongChanged):
         self.analysis = event.analysis
         self.sections = self.analysis['sections']
-        self.segments = merge_short_segments_recursive(self.analysis['segments'])
+        # visualize_segments(self.analysis['segments'])
+        self.segments = merge_short_segments(self.analysis['segments'])
         self.bars = self.analysis['bars']
         self.last_bar = self.bars[0]
         self.current_section = self.sections[0]
@@ -90,12 +93,14 @@ class LightsController:
         next_segment = get_next_item(self.segments, current_time)
         current_bar = get_current_item(self.bars, current_time)
         if not next_segment or not current_bar:
+            logger.debug("skipping adjust progress")
             return
+        self.last_next_segment = next_segment
         current_bar_duration = current_bar["duration"] - (current_time - current_bar['start'])
         brightness = self.map_brightness(next_segment)
 
         # Check if we need to move to the next bar
-        if self.last_bar != current_bar and current_bar['confidence'] > 0.8:
+        if self.last_bar != current_bar and current_bar['confidence'] > 0.5:
             logger.warning(f"Transitioning from bar {self.bars.index(self.last_bar)} to bar {self.bars.index(current_bar)} in {current_bar_duration:.2f}s")
             asyncio.create_task(self.set_parameters(current_bar_duration, change_color=True))
             self.last_bar = current_bar
