@@ -1,21 +1,82 @@
 import asyncio
 from yeelight import Bulb
 from loguru import logger
+from collections import deque  # Import deque for fixed-size queue
 
 from custom_lock import CustomLock  # Import the CustomLock class
 from utils import CONTROLLER_TICK
 
+
 class LightDevice:
-    def __init__(self, bulb: Bulb):
+    def __init__(self, bulb: Bulb, latency_history_size: int = 5):
         """
         Initializes the LightDevice with a Yeelight Bulb instance.
 
         :param bulb: An instance of yeelight.Bulb.
+        :param latency_history_size: Number of recent latency measurements to keep for averaging.
         """
         self.bulb = bulb
         self.ip = bulb._ip
         self.model = bulb.get_capabilities()["model"]  # type: ignore
         self.lock = CustomLock()
+        self.latency_history = deque(maxlen=latency_history_size)  # Store last n latencies
+        self.latency = 0  # Default latency in seconds (50ms)
+
+    async def measure_latency(self, retries: int = 5) -> float:
+        """
+        Measures the round-trip time (RTT) to the bulb by sending a simple command.
+
+        :param retries: Number of attempts to measure latency.
+        :return: Average latency in seconds based on the history.
+        """
+        latencies = []
+        for i in range(retries):
+            start_time = asyncio.get_event_loop().time()
+            try:
+                # Send a simple get_prop command to measure latency
+                await asyncio.to_thread(self.bulb.get_properties, ["power"])
+                end_time = asyncio.get_event_loop().time()
+                latency = end_time - start_time
+                latencies.append(latency)
+                self.latency_history.append(latency)  # Add to history
+                logger.debug(f"Latency measurement {i+1}/{retries} for {self.ip}: {latency * 1000:.2f} ms")
+                await asyncio.sleep(0.05)  # Small delay between measurements
+            except Exception as e:
+                logger.error(f"Latency measurement failed for {self.ip}: {e}")
+
+        if self.latency_history:
+            self.latency = sum(self.latency_history) / len(self.latency_history)
+            logger.info(f"Updated average latency for {self.ip}: {self.latency * 1000:.2f} ms (based on {len(self.latency_history)} measurements)")
+        else:
+            logger.warning(f"No successful latency measurements for {self.ip}. Using default latency.")
+            self.latency = 0.05  # Reset to default if no measurements
+
+        return self.latency
+
+    async def start_latency_monitor(self, interval: float = 60.0, retries: int = 5):
+        """
+        Starts a background task to periodically measure latency.
+
+        :param interval: Time between latency measurements in seconds.
+        :param retries: Number of attempts per measurement.
+        """
+        while True:
+            await self.measure_latency(retries=retries)
+            await asyncio.sleep(interval)
+
+    async def initialize(self, latency_history_size: int = 5, monitor_interval: float = 60.0, retries: int = 5):
+        """
+        Initializes the device by measuring initial latency and starting the latency monitor.
+
+        :param latency_history_size: Number of recent latency measurements to keep for averaging.
+        :param monitor_interval: Time between latency measurements in seconds.
+        :param retries: Number of attempts per latency measurement.
+        """
+        # Update deque size if different from default
+        if latency_history_size != self.latency_history.maxlen:
+            self.latency_history = deque(maxlen=latency_history_size)
+        await self.measure_latency(retries=retries)
+        asyncio.create_task(self.start_latency_monitor(interval=monitor_interval, retries=retries))
 
     async def set_brightness(self, brightness: int, duration: float = 0.05):
         """
@@ -82,56 +143,4 @@ class LightDevice:
             logger.error(f"Failed to set HSV for {self.ip}: {e}")
         finally:
             await asyncio.sleep(CONTROLLER_TICK)  # Adjust sleep as needed
-            self.lock.release()
-
-    async def turn_on(self, duration: float = 0.05):
-        """
-        Asynchronously turns on the bulb.
-        Ignores the request if the device is currently handling another state change.
-
-        :param duration: Duration of the transition in seconds.
-        """
-        if self.lock.locked():
-            logger.trace(f"Turn on ignored for {self.ip} because it's currently locked.")
-            return
-
-        await self.lock.acquire()
-        try:
-            logger.trace(f"Turning on bulb {self.ip} over {duration}s")
-            await asyncio.to_thread(
-                self.bulb.turn_on, duration=int(duration * 1000)
-            )
-            logger.trace(f"Bulb {self.ip} turned on")
-        except asyncio.CancelledError:
-            logger.trace(f"Turn on task was cancelled for {self.ip}.")
-            raise
-        except Exception as e:
-            logger.error(f"Failed to turn on bulb {self.ip}: {e}")
-        finally:
-            self.lock.release()
-
-    async def turn_off(self, duration: float = 0.05):
-        """
-        Asynchronously turns off the bulb.
-        Ignores the request if the device is currently handling another state change.
-
-        :param duration: Duration of the transition in seconds.
-        """
-        if self.lock.locked():
-            logger.trace(f"Turn off ignored for {self.ip} because it's currently locked.")
-            return
-
-        await self.lock.acquire()
-        try:
-            logger.trace(f"Turning off bulb {self.ip} over {duration}s")
-            await asyncio.to_thread(
-                self.bulb.turn_off, duration=int(duration * 1000)
-            )
-            logger.trace(f"Bulb {self.ip} turned off")
-        except asyncio.CancelledError:
-            logger.trace(f"Turn off task was cancelled for {self.ip}.")
-            raise
-        except Exception as e:
-            logger.error(f"Failed to turn off bulb {self.ip}: {e}")
-        finally:
             self.lock.release()

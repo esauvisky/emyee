@@ -8,6 +8,7 @@ from light_controller import LightsController
 from device_manager import DeviceManager
 from utils import setup_logging
 
+
 def main():
     load_dotenv(".env")
     user_id = os.getenv('USER_ID')
@@ -26,10 +27,12 @@ def main():
     loop = asyncio.get_event_loop()
     loop.run_until_complete(
         asyncio.gather(
+            device_manager.initialize_devices(devices),  # Measure latency
             spotify_listener.listen(),
             light_controller.control_lights()
         )
     )
+
 
 if __name__ == '__main__':
     main()

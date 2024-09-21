@@ -94,7 +94,7 @@ class LightsController:
         next_segment = get_next_item(self.segments, current_time)
         current_bar = get_current_item(self.bars, current_time)
         if not next_segment or not current_bar:
-            logger.debug("skipping adjust progress")
+            # logger.debug("skipping adjust progress")
             return
         self.last_next_segment = next_segment
         current_bar_duration = current_bar["duration"] - (current_time - current_bar['start'])

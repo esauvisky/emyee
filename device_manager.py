@@ -2,6 +2,7 @@ from typing import List
 from yeelight import discover_bulbs, Bulb
 from loguru import logger
 from light_device import LightDevice  # Import the new LightDevice class
+import asyncio
 
 class DeviceManager:
     def __init__(self, effect="smooth", auto_on=False):
@@ -40,3 +41,12 @@ class DeviceManager:
 
         logger.info(f"Found and initialized {len(devices)} LightDevice(s).")
         return devices
+
+    async def initialize_devices(self, devices: List[LightDevice]):
+        """
+        Initializes each device by measuring latency and starting the latency monitor.
+
+        :param devices: List of LightDevice instances.
+        """
+        tasks = [device.initialize() for device in devices]
+        await asyncio.gather(*tasks)
