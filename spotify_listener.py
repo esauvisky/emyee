@@ -32,14 +32,14 @@ class SpotifyChangesListener:
         asyncio.create_task(self.fetch_spotify_changes())
         await asyncio.sleep(1)
         while True:
-            await asyncio.sleep(SPOTIFY_CHANGES_LISTENER_DELAY)
             new_progress = self.current_progress + time.time() - self.last_api_update_time
             if self.last_progress > new_progress and self.last_progress - new_progress < SPOTIFY_CHANGES_LISTENER_FAILURE_DELAY:
                 logger.trace("Spotify API request rate limit exceeded. Waiting...")
-                await asyncio.sleep(SPOTIFY_CHANGES_LISTENER_DELAY)
+                # await asyncio.sleep(SPOTIFY_CHANGES_LISTENER_DELAY)
                 continue
             await self.events_queue.put(EventAdjustProgressTime(new_progress))
             self.last_progress = new_progress
+            await asyncio.sleep(SPOTIFY_CHANGES_LISTENER_DELAY)
 
     async def fetch_spotify_changes(self):
         access_token = prompt_for_user_token(
