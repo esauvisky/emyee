@@ -13,7 +13,7 @@ def main():
     user_id = os.getenv('USER_ID')
     client_id = os.getenv('CLIENT_ID')
     client_secret = os.getenv('CLIENT_SECRET')
-    setup_logging("DEBUG")
+    setup_logging("TRACE")
 
     device_manager = DeviceManager()
     devices = device_manager.discover_devices()
