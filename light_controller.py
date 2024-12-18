@@ -1,4 +1,5 @@
 import asyncio
+import json
 import time
 from typing import List
 from dotenv import load_dotenv
@@ -29,7 +30,7 @@ class LightsController:
         self.current_saturation = random.randint(50, 80)
         self.current_brightness = 0
         self.sections = []   # List of song sections
-        self.last_bar = {}
+        self.last_next_bar = {}
         self.last_next_segment = None
         self.current_section = None
         self.analysis = None
@@ -61,11 +62,13 @@ class LightsController:
 
     def handle_song_changed(self, event: EventSongChanged):
         self.analysis = event.analysis
+        with open("analysis.json", "w") as f:
+            json.dump(self.analysis, f, indent=4)
         self.sections = self.analysis['sections']
         # visualize_segments(self.analysis['segments'])
         self.segments = merge_short_segments(self.analysis['segments'])
         self.bars = self.analysis['bars']
-        self.last_bar = self.bars[0]
+        self.last_next_bar = self.bars[0]
         self.current_section = self.sections[0]
         self.beats = self.analysis['beats']
 
@@ -92,24 +95,25 @@ class LightsController:
 
     async def handle_adjust_progress(self, current_time: float):
         next_segment = get_next_item(self.segments, current_time)
-        current_bar = get_current_item(self.bars, current_time)
-        if not next_segment or not current_bar:
+        next_bar = get_next_item(self.bars, current_time)
+        if not next_segment or not next_bar:
             logger.debug("skipping adjust progress")
             return
         self.last_next_segment = next_segment
-        current_bar_duration = current_bar["duration"] - (current_time - current_bar['start'])
         brightness = self.map_brightness(next_segment)
 
-        # Check if we need to move to the next bar
-        if self.last_bar != current_bar and current_bar['confidence'] > 0.5:
-            logger.warning(f"Transitioning from bar {self.bars.index(self.last_bar)} to bar {self.bars.index(current_bar)} in {current_bar_duration:.2f}s")
-            asyncio.create_task(self.set_parameters(current_bar_duration, change_color=True))
-            self.last_bar = current_bar
         # Check if we need to move to the next segment
-        elif next_segment['start']:
+        if next_segment['start']:
             asyncio.create_task(self.set_parameters(next_segment['duration'], brightness=brightness))
 
-    async def set_parameters(self, duration: float = 0.05, brightness: int | None = None, change_color: bool = False):
+        # Check if we need to move to the next bar
+        if self.last_next_bar != next_bar and next_bar['confidence'] > 0.7:
+            next_bar_duration = (next_bar["duration"] - (current_time - next_bar['start']))
+            logger.warning(f"Transitioning from bar {self.bars.index(self.last_next_bar)} to bar {self.bars.index(next_bar)} in {next_bar_duration:.2f}s")
+            asyncio.create_task(self.set_parameters(next_bar_duration / 4, change_color=True, wait_before_ms=next_bar_duration / 3))
+            self.last_next_bar = next_bar
+
+    async def set_parameters(self, duration: float = 0.05, brightness: int | None = None, change_color: bool = False, wait_before_ms: int = 0):
         # Determine new parameters
         if change_color:
             new_hue, new_saturation = get_vibrant_color(self._current_params['hue'])
@@ -136,9 +140,6 @@ class LightsController:
             self._current_params['saturation'] = new_saturation
         elif brightness is not None:
             self._current_params['brightness'] = new_brightness
-        else:
-            logger.debug("No parameter changes detected. Skipping set_parameters to prevent blinking.")
-            return
 
         logger.info(f"Setting parameters: duration={duration:.2f}s, brightness={new_brightness}%, hue={new_hue}, saturation={new_saturation}")
 
@@ -153,6 +154,9 @@ class LightsController:
                     set_tasks.append(device.set_hsv(new_hue, new_saturation, new_brightness, duration=duration))
                 elif brightness is not None:
                     set_tasks.append(device.set_brightness(new_brightness, duration=duration))
+
+        # Wait pre-ms
+        await asyncio.sleep(wait_before_ms)
 
         # Execute all state changes concurrently
         await asyncio.gather(*set_tasks)
