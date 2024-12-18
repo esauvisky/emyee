@@ -57,16 +57,16 @@ class LightDevice:
         """
         if self.lock.locked():
             logger.trace(f"HSV change attempting to override current state change for {self.ip}.")
-            holder_task = self.lock.holder
-            if holder_task and not holder_task.done():
-                logger.trace(f"Cancelling current state change task for {self.ip}.")
-                holder_task.cancel()
-                try:
-                    await holder_task
-                except asyncio.CancelledError:
-                    logger.trace(f"Cancelled task holding the lock for {self.ip}.")
-                except Exception as e:
-                    logger.error(f"Error while cancelling task for {self.ip}: {e}")
+            self.lock.holder.cancel()
+            self.lock.release()
+            # if holder_task and not holder_task.done():
+            #     logger.trace(f"Cancelling current state change task for {self.ip}.")
+            #     try:
+            #         await holder_task
+            #     except asyncio.CancelledError:
+            #         logger.trace(f"Cancelled task holding the lock for {self.ip}.")
+            #     except Exception as e:
+            #         logger.error(f"Error while cancelling task for {self.ip}: {e}")
 
         await self.lock.acquire()
         try:
@@ -81,7 +81,7 @@ class LightDevice:
         except Exception as e:
             logger.error(f"Failed to set HSV for {self.ip}: {e}")
         finally:
-            await asyncio.sleep(CONTROLLER_TICK)  # Adjust sleep as needed
+            await asyncio.sleep(CONTROLLER_TICK + duration)  # Adjust sleep as needed
             self.lock.release()
 
     async def turn_on(self, duration: float = 0.05):
