@@ -7,7 +7,7 @@ from typing import Dict, Any, List
 # Define a type alias for Spotify's raw response for clarity
 RawSpotifyResponse = Dict[str, Any]
 CONTROLLER_TICK = 0.001
-MIN_SEGMENT_DURATION = 0.2
+MIN_SEGMENT_DURATION = 0.1
 API_CURRENT_PLAYING = 'https://api.spotify.com/v1/me/player/currently-playing'
 API_AUDIO_ANALYSIS = 'https://api.spotify.com/v1/audio-analysis/'
 SPOTIFY_CHANGES_LISTENER_DELAY = 0.001
@@ -175,72 +175,72 @@ def merge_short_segments(segments: List[Dict[str, Any]], min_duration: float = M
     return merged_segments
 
 
-def visualize_segments(segments: List[float]):
+def visualize_segments(bars: List[float]):
 
     import matplotlib.pyplot as plt
     import seaborn as sns
     import pandas as pd
     # Convert to DataFrame
-    df_segments = pd.DataFrame(segments)
+    df_bars = pd.DataFrame(bars)
 
 
     # Extract durations
-    durations = df_segments['duration']
+    confidences = df_bars['confidence']
     # Set plot style
     sns.set(style="whitegrid")
 
     # Plot histogram
     plt.figure(figsize=(10, 6))
-    sns.histplot(durations, bins=50, kde=True)
-    plt.title('Distribution of Segment Durations')
-    plt.xlabel('Duration (seconds)')
+    sns.histplot(confidences, bins=50, kde=True)
+    plt.title('Distribution of Segment confidences')
+    plt.xlabel('confidence (seconds)')
     plt.ylabel('Frequency')
     plt.show()
     # Calculate basic statistics
-    mean_duration = durations.mean()
-    median_duration = durations.median()
-    std_duration = durations.std()
-    min_duration = durations.min()
-    max_duration = durations.max()
+    mean_confidence = confidences.mean()
+    median_confidence = confidences.median()
+    std_confidence = confidences.std()
+    min_confidence = confidences.min()
+    max_confidence = confidences.max()
 
-    print(f"Mean Duration: {mean_duration:.4f} seconds")
-    print(f"Median Duration: {median_duration:.4f} seconds")
-    print(f"Standard Deviation: {std_duration:.4f} seconds")
-    print(f"Min Duration: {min_duration:.4f} seconds")
-    print(f"Max Duration: {max_duration:.4f} seconds")
+    print(f"Mean confidence: {mean_confidence:.4f} seconds")
+    print(f"Median confidence: {median_confidence:.4f} seconds")
+    print(f"Standard Deviation: {std_confidence:.4f} seconds")
+    print(f"Min confidence: {min_confidence:.4f} seconds")
+    print(f"Max confidence: {max_confidence:.4f} seconds")
     # Calculate percentiles
     percentiles = [10, 25, 50, 75, 90]
-    percentile_values = durations.quantile([p/100 for p in percentiles])
+    percentile_values = confidences.quantile([p/100 for p in percentiles])
 
-    print("Percentile Durations:")
+    print("Percentile confidences:")
     for p, value in zip(percentiles, percentile_values):
         print(f"{p}th percentile: {value:.4f} seconds")
     # Calculate percentiles
     percentiles = [10, 25, 50, 75, 90]
-    percentile_values = durations.quantile([p/100 for p in percentiles])
+    percentile_values = confidences.quantile([p/100 for p in percentiles])
 
-    print("Percentile Durations:")
+    print("Percentile confidences:")
     for p, value in zip(percentiles, percentile_values):
         print(f"{p}th percentile: {value:.4f} seconds")
     # Define outlier threshold (e.g., below 5th percentile)
-    outlier_threshold = durations.quantile(0.05)
+    outlier_threshold = confidences.quantile(0.05)
     print(f"Outlier Threshold (5th percentile): {outlier_threshold:.4f} seconds")
 
     # Count outliers
-    outliers = durations[durations < outlier_threshold]
+    outliers = confidences[confidences < outlier_threshold]
     print(f"Number of Outliers: {len(outliers)}")
 
-    min_segment_duration = durations.quantile(0.25)
-    print(f"Optimal MIN_SEGMENT_DURATION set to 25th percentile: {min_segment_duration:.4f} seconds")
+    min_segment_confidence = confidences.quantile(0.25)
+    print(f"Optimal MIN_SEGMENT_confidence set to 25th percentile: {min_segment_confidence:.4f} seconds")
 
-    min_segment_duration = max(mean_duration - std_duration, 0.1)  # Ensure it's not negative
-    print(f"Optimal MIN_SEGMENT_DURATION set to Mean - Std Dev: {min_segment_duration:.4f} seconds")
+    min_segment_confidence = max(mean_confidence - std_confidence, 0.1)  # Ensure it's not negative
+    print(f"Optimal MIN_SEGMENT_confidence set to Mean - Std Dev: {min_segment_confidence:.4f} seconds")
 
     from sklearn.cluster import KMeans
     import numpy as np
 
     # Reshape data for clustering
-    X = durations.values.reshape(-1, 1)
+    X = confidences.values.reshape(-1, 1)
 
     # Apply K-Means with 2 clusters
     kmeans = KMeans(n_clusters=2, random_state=42).fit(X)
@@ -248,27 +248,27 @@ def visualize_segments(segments: List[float]):
     # Identify which cluster is shorter
     cluster_centers = kmeans.cluster_centers_.flatten()
     short_cluster = cluster_centers.argmin()
-    min_segment_duration = X[kmeans.labels_ == short_cluster].max()  # Maximum duration in short cluster
+    min_segment_confidence = X[kmeans.labels_ == short_cluster].max()  # Maximum confidence in short cluster
 
-    print(f"Optimal MIN_SEGMENT_DURATION set using K-Means: {min_segment_duration:.4f} seconds")
+    print(f"Optimal MIN_SEGMENT_confidence set using K-Means: {min_segment_confidence:.4f} seconds")
 
-    def dynamic_min_segment_duration(recent_durations, window_size=100, multiplier=1.0):
+    def dynamic_min_segment_confidence(recent_confidences, window_size=100, multiplier=1.0):
         """
-        Calculates a dynamic MIN_SEGMENT_DURATION based on the moving average of recent durations.
+        Calculates a dynamic MIN_SEGMENT_confidence based on the moving average of recent confidences.
 
-        :param recent_durations: List or array of recent segment durations.
-        :param window_size: Number of recent durations to consider.
+        :param recent_confidences: List or array of recent segment confidences.
+        :param window_size: Number of recent confidences to consider.
         :param multiplier: Multiplier to adjust the threshold.
-        :return: Calculated MIN_SEGMENT_DURATION.
+        :return: Calculated MIN_SEGMENT_confidence.
         """
-        if len(recent_durations) < window_size:
-            window = recent_durations
+        if len(recent_confidences) < window_size:
+            window = recent_confidences
         else:
-            window = recent_durations[-window_size:]
+            window = recent_confidences[-window_size:]
         moving_avg = np.mean(window)
         return moving_avg * multiplier
 
     # Example usage
-    recent_durations = durations.tolist()  # Or maintain a separate list for recent durations
-    min_segment_duration = dynamic_min_segment_duration(recent_durations, window_size=100, multiplier=0.8)
-    print(f"Dynamic MIN_SEGMENT_DURATION: {min_segment_duration:.4f} seconds")
+    recent_confidences = confidences.tolist()  # Or maintain a separate list for recent confidences
+    min_segment_confidence = dynamic_min_segment_confidence(recent_confidences, window_size=100, multiplier=0.8)
+    print(f"Dynamic MIN_SEGMENT_confidence: {min_segment_confidence:.4f} seconds")
