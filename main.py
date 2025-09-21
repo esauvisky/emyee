@@ -8,6 +8,7 @@ from light_controller import LightsController
 from device_manager import DeviceManager
 from utils import setup_logging
 
+# main.py
 def main():
     load_dotenv(".env")
     user_id = os.getenv('USER_ID')
@@ -19,17 +20,26 @@ def main():
     devices = device_manager.discover_devices()
 
     events_queue = asyncio.Queue()
-
     spotify_listener = SpotifyChangesListener(user_id, client_id, client_secret, events_queue)
     light_controller = LightsController(devices, events_queue)
 
     loop = asyncio.get_event_loop()
-    loop.run_until_complete(
-        asyncio.gather(
-            spotify_listener.listen(),
-            light_controller.control_lights()
+
+    # Start each device worker on this loop (OK before run_until_complete)
+    for d in devices:
+        d.start(loop)
+
+    try:
+        loop.run_until_complete(
+            asyncio.gather(
+                spotify_listener.listen(),
+                light_controller.control_lights(),
+            )
         )
-    )
+    finally:
+        # Optional: graceful shutdown
+        loop.run_until_complete(asyncio.gather(*(d.stop() for d in devices), return_exceptions=True))
+
 
 if __name__ == '__main__':
     main()

@@ -10,11 +10,11 @@ CONTROLLER_TICK = 0.001
 MIN_SEGMENT_DURATION = 0.1
 API_CURRENT_PLAYING = 'https://api.spotify.com/v1/me/player/currently-playing'
 API_AUDIO_ANALYSIS = 'https://api.spotify.com/v1/audio-analysis/'
-SPOTIFY_CHANGES_LISTENER_DELAY = 0.001
+SPOTIFY_CHANGES_LISTENER_DELAY = 0.1
 SPOTIFY_CHANGES_LISTENER_FAILURE_DELAY = 1
 SPOTIFY_REDIRECT_URI = 'http://localhost:8000/'
 SPOTIFY_SCOPE = 'user-read-currently-playing,user-read-playback-state'
-API_REQUEST_INTERVAL = 0.5
+API_REQUEST_INTERVAL = 1
 COLORS = [(255, 102, 129), (204, 0, 203), (232, 62, 62), (102, 0, 102), (0, 0, 204), (59, 0, 104), (0, 0, 102),
           (0, 203, 204), (76, 126, 128), (0, 102, 102), (102, 102, 0), (204, 0, 0), (102, 0, 0), (203, 204, 0),
           (204, 172, 0), (204, 132, 0), (0, 204, 0), (0, 102, 0)]
@@ -272,3 +272,64 @@ def visualize_segments(bars: List[float]):
     recent_confidences = confidences.tolist()  # Or maintain a separate list for recent confidences
     min_segment_confidence = dynamic_min_segment_confidence(recent_confidences, window_size=100, multiplier=0.8)
     print(f"Dynamic MIN_SEGMENT_confidence: {min_segment_confidence:.4f} seconds")
+
+# utils.py
+from typing import Tuple
+
+def _beats_in_window(beats: List[Dict[str, Any]], start: float, end: float) -> List[Dict[str, Any]]:
+    # Beats whose start is within the bar window
+    return [b for b in beats if start <= b['start'] < end]
+
+def _beats_per_bar(beats: List[Dict[str, Any]], bar: Dict[str, Any]) -> int:
+    return len(_beats_in_window(beats, bar['start'], bar['start'] + bar['duration']))
+
+def _next_bar_index(bars: List[Dict[str, Any]], t: float) -> int:
+    # First bar whose window still covers t or starts after it
+    for i, b in enumerate(bars):
+        if b['start'] <= t < b['start'] + b['duration']:
+            return i
+        if b['start'] > t:
+            return i
+    return len(bars) - 1
+
+def min_segment_duration_from_future_measures(
+    beats: List[Dict[str, Any]],
+    bars: List[Dict[str, Any]],
+    current_time: float,
+    lookahead_bars: int = 16,
+    half_factor: float = 0.24,
+) -> Tuple[float, int, float]:
+    """
+    Scan forward from the bar at/after current_time. Collect consecutive bars
+    that have the same beats-per-measure as the first such bar. Average their
+    durations, then return a MIN_SEGMENT_DURATION that's a bit less than half
+    a measure to favor changes every ~two beats.
+
+    Returns:
+        (min_segment_duration_seconds, beats_per_measure, avg_measure_duration_seconds)
+    """
+    if not bars:
+        # absolute fallback
+        return max(0.05, CONTROLLER_TICK * 8), 4, 0.5
+
+    i0 = _next_bar_index(bars, current_time)
+    first_bar = bars[i0]
+    bpm_first = _beats_per_bar(beats, first_bar) or 4  # fallback if detection fails
+
+    total_dur = 0.0
+    count = 0
+    for b in bars[i0 : min(len(bars), i0 + lookahead_bars)]:
+        bpm_here = _beats_per_bar(beats, b) or bpm_first
+        if bpm_here != bpm_first and count > 0:
+            break
+        total_dur += b['duration']
+        count += 1
+
+    avg_measure = (total_dur / count) if count else first_bar['duration']
+
+    # "A little less than half a measure"
+    min_seg = avg_measure * half_factor
+
+    # Safety lower bound – don’t let it get absurdly small
+    min_seg = max(min_seg, CONTROLLER_TICK * 8, 0.05)
+    return float(min_seg), int(bpm_first), float(avg_measure)
