@@ -23,13 +23,13 @@ def main():
     spotify_listener = SpotifyChangesListener(user_id, client_id, client_secret, events_queue)
     light_controller = LightsController(devices, events_queue)
 
-    loop = asyncio.get_event_loop()
-    loop.run_until_complete(
-        asyncio.gather(
+    async def run_app():
+        await asyncio.gather(
             spotify_listener.listen(),
             light_controller.control_lights()
         )
-    )
+    
+    asyncio.run(run_app())
 
 if __name__ == '__main__':
     main()

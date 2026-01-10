@@ -79,7 +79,14 @@ class SpotifyChangesListener:
 
     async def _get_audio_analysis(self, session, track_id):
         async with session.get(f"{API_AUDIO_ANALYSIS}{track_id}") as response:
-            return await response.json()
+            analysis = await response.json()
+            
+            # Check if the response contains an error
+            if 'error' in analysis:
+                logger.error(f"Failed to get audio analysis for track {track_id}: {analysis['error']}")
+                return analysis  # Return the error so it can be handled upstream
+            
+            return analysis
 
     def _get_start_time(self, current_playing, request_time):
         # spotify timestamp appears to be incorrect https://github.com/spotify/web-api/issues/640

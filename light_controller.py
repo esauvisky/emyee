@@ -29,6 +29,9 @@ class LightsController:
         self.current_saturation = random.randint(50, 80)
         self.current_brightness = 0
         self.sections = []   # List of song sections
+        self.segments = []   # List of song segments
+        self.bars = []       # List of song bars
+        self.beats = []      # List of song beats
         self.last_bar = {}
         self.last_next_segment = None
         self.current_section = None
@@ -61,12 +64,26 @@ class LightsController:
 
     def handle_song_changed(self, event: EventSongChanged):
         self.analysis = event.analysis
+        
+        # Check if the analysis contains an error
+        if 'error' in self.analysis:
+            logger.error(f"Spotify API returned an error: {self.analysis['error']}")
+            return
+        
+        # Check if required keys exist in the analysis
+        required_keys = ['sections', 'segments', 'bars', 'beats']
+        missing_keys = [key for key in required_keys if key not in self.analysis]
+        
+        if missing_keys:
+            logger.error(f"Analysis missing required keys: {missing_keys}. Available keys: {list(self.analysis.keys())}")
+            return
+            
         self.sections = self.analysis['sections']
         # visualize_segments(self.analysis['segments'])
         self.segments = merge_short_segments(self.analysis['segments'])
         self.bars = self.analysis['bars']
-        self.last_bar = self.bars[0]
-        self.current_section = self.sections[0]
+        self.last_bar = self.bars[0] if self.bars else {}
+        self.current_section = self.sections[0] if self.sections else {}
         self.beats = self.analysis['beats']
 
     def map_brightness(self, segment):
@@ -91,6 +108,11 @@ class LightsController:
         return brightness
 
     async def handle_adjust_progress(self, current_time: float):
+        # Check if we have valid analysis data
+        if not self.segments or not self.bars:
+            logger.debug("No segments or bars available, skipping adjust progress")
+            return
+            
         next_segment = get_next_item(self.segments, current_time)
         current_bar = get_current_item(self.bars, current_time)
         if not next_segment or not current_bar:

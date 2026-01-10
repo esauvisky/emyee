@@ -29,10 +29,21 @@ class DeviceManager:
             port = bulb_info.get("port", 55443)  # Default port for Yeelight bulbs
 
             try:
-                bulb = Bulb(ip, port, effect=self.effect, auto_on=self.auto_on)
+                bulb = Bulb(ip, port, effect=self.effect, auto_on=False, model="color")
                 # Initialize LightDevice with the Bulb instance
                 light_device = LightDevice(bulb)
-                bulb.start_music()
+                try:
+                    bulb.turn_on()
+                except:
+                    logger.warning(f"Bulb at {ip}:{port} does not support turn_on.")
+                try:
+                    bulb.stop_music()
+                except:
+                    logger.warning(f"Bulb at {ip}:{port} does not support stop music mode.")
+                try:
+                    bulb.start_music()
+                except:
+                    logger.warning(f"Bulb at {ip}:{port} does not support start music mode.")
                 devices.append(light_device)
                 logger.info(f"Initialized LightDevice at {ip}:{port}")
             except Exception as e:
