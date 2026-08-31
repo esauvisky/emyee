@@ -57,7 +57,7 @@ The application will discover and initialize the Yeelight bulbs on your network,
 
 ## Customization
 
-You can customize the lighting effects by modifying the `DeviceManager` and `LightsController` classes in the respective `device_manager.py` and `light_controller.py` files. Be warned tho, most likely  even the slightest change might break everything.
+Playback uses the atmospheric beat-pulse implementation in `light_controller.py`. Edit `ATMOSPHERIC_DB` in `atmospheric.py` to tune the accented/subtle beat cycle, subtle strength, and downbeat boost for each energy level. Profiles rotate every four analyzed bars. The standalone `pattern_tester.py` remains available for manually experimenting with the patterns in `patterns.py`, but those patterns are not used during Spotify playback.
 
 ## License
 

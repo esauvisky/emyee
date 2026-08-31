@@ -18,6 +18,10 @@ class EventSongChanged:
     """
     analysis: RawSpotifyResponse
     progress_time_ms: float
+    song_name: str = ""
+    artist_names: str = ""
+    album_name: str = ""
+    track_id: str = ""
 
 @dataclass
 class EventAdjustProgressTime:
