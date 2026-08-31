@@ -28,9 +28,14 @@ class DeviceManager:
         logger.info("Discovering bulbs...")
         bulbs_info = discover_bulbs()
         devices: List[LightDevice] = []
+        seen_ips = set()
 
         for bulb_info in bulbs_info:
             ip = bulb_info["ip"]
+            if ip in seen_ips:
+                logger.debug(f"Ignoring duplicate discovery result for {ip}")
+                continue
+            seen_ips.add(ip)
             port = bulb_info.get("port", 55443)
             if ip in self.tokens:
                 reset_device(ip, self.tokens[ip])
@@ -60,10 +65,9 @@ class DeviceManager:
                         try:
                             bulb.start_music()
                             logger.info(f"Music mode enabled on {ip}")
+                            music_mode_active = True
                         except Exception as fallback_error:
                             logger.warning(f"Music mode fallback failed on {ip} ({fallback_error}). Using standard mode.")
-
-                    music_mode_active = True
                 light_device = LightDevice(bulb)
                 light_device.music_mode = music_mode_active
                 devices.append(light_device)

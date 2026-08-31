@@ -5,7 +5,6 @@ from colorsys import hsv_to_rgb
 from yeelight import Bulb
 from loguru import logger
 
-from utils import CONTROLLER_TICK
 
 
 @dataclass
@@ -15,6 +14,8 @@ class DesiredState:
     saturation: Optional[int] = None
     brightness: Optional[int] = None
     duration: float = 0.05
+    replaceable: bool = False
+    dispatch_at: float | None = None
 
 
 class LightDevice:
@@ -28,11 +29,9 @@ class LightDevice:
             self.model = "unknown"
         self.music_mode: bool = False
         self._latency_samples: list = []
-        self._desired: Optional[DesiredState] = None
-        self._update_event = asyncio.Event()
+        self._commands = asyncio.Queue()
         self._stop_event = asyncio.Event()
         self._worker_task: Optional[asyncio.Task] = None
-        self._color_busy_until: float = 0.0           # monotonic deadline while HSV is flowing
 
     @property
     def estimated_latency(self) -> float:
@@ -45,9 +44,6 @@ class LightDevice:
         if len(self._latency_samples) > 10:
             self._latency_samples.pop(0)
 
-    def _color_busy(self) -> bool:
-        return asyncio.get_event_loop().time() < self._color_busy_until
-
     def start(self, loop: Optional[asyncio.AbstractEventLoop] = None):
         """Schedule background worker on the provided loop (or current event loop)."""
         if self._worker_task and not self._worker_task.done():
@@ -58,7 +54,7 @@ class LightDevice:
 
     async def stop(self):
         self._stop_event.set()
-        self._update_event.set()
+        self._commands.put_nowait(None)
         if self._worker_task:
             try:
                 await self._worker_task
@@ -67,30 +63,31 @@ class LightDevice:
 
     # ---- Public API (called by controller) ----
 
-    async def set_brightness(self, brightness: int, duration: float = 0.05):
-        # If a color transition is currently flowing, ignore brightness updates
-        if self._color_busy():
-            logger.trace(f"[{self.ip}] skip brightness {brightness}% (color transition flowing)")
-            return
-        self._desired = DesiredState(mode="brightness", brightness=int(brightness), duration=float(duration))
-        self._update_event.set()
+    async def set_brightness(self, brightness: int, duration: float = 0.05, dispatch_at: float | None = None):
+        command = DesiredState(mode="brightness", brightness=int(brightness), duration=float(duration), replaceable=True, dispatch_at=dispatch_at)
+        pending = list(self._commands._queue)
+        kept = [item for item in pending if not (getattr(item, 'replaceable', False) and item.mode == "brightness")]
+        removed = len(pending) - len(kept)
+        if removed:
+            self._commands._queue.clear()
+            self._commands._queue.extend(kept)
+            self._commands._unfinished_tasks -= removed
+            if self._commands._unfinished_tasks == 0:
+                self._commands._finished.set()
+        self._commands.put_nowait(command)
 
-    async def set_hsv(self, hue: int, saturation: int, brightness: int, duration: float = 0.05):
-        # HSV supersedes pending brightness-only updates
-        self._desired = DesiredState(mode="hsv",
-                                     hue=int(hue),
-                                     saturation=int(saturation),
-                                     brightness=int(brightness),
-                                     duration=float(duration))
-        self._update_event.set()
+    async def set_hsv(self, hue: int, saturation: int, brightness: int, duration: float = 0.05, dispatch_at: float | None = None):
+        self._commands.put_nowait(DesiredState(mode="hsv",
+                                               hue=int(hue),
+                                               saturation=int(saturation),
+                                               brightness=int(brightness),
+                                               duration=float(duration), dispatch_at=dispatch_at))
 
     async def turn_on(self, duration: float = 0.05):
-        self._desired = DesiredState(mode="on", duration=float(duration))
-        self._update_event.set()
+        self._commands.put_nowait(DesiredState(mode="on", duration=float(duration)))
 
     async def turn_off(self, duration: float = 0.05):
-        self._desired = DesiredState(mode="off", duration=float(duration))
-        self._update_event.set()
+        self._commands.put_nowait(DesiredState(mode="off", duration=float(duration)))
 
     # ---- Worker loop ----
 
@@ -98,14 +95,20 @@ class LightDevice:
         logger.debug(f"[{self.ip}] worker started")
         try:
             while not self._stop_event.is_set():
-                # Wait until there’s something to do
-                await self._update_event.wait()
-                self._update_event.clear()
-
-                # Snapshot the latest desired state (coalesced)
-                desired = self._desired
-                self._desired = None
+                desired = await self._commands.get()
                 if desired is None:
+                    self._commands.task_done()
+                    break
+
+                if desired.dispatch_at is not None:
+                    await asyncio.sleep(max(0.0, desired.dispatch_at - asyncio.get_event_loop().time()))
+                if (
+                    desired.replaceable
+                    and desired.dispatch_at is not None
+                    and asyncio.get_event_loop().time() > desired.dispatch_at + max(desired.duration, 0.05)
+                ):
+                    logger.debug(f"[{self.ip}] dropped stale brightness command")
+                    self._commands.task_done()
                     continue
 
                 try:
@@ -114,8 +117,6 @@ class LightDevice:
                     if desired.mode == "hsv":
                         logger.trace(f"[{self.ip}] apply HSV ({desired.hue},{desired.saturation},{desired.brightness}) "
                                      f"over {desired.duration:.3f}s")
-                        # Mark busy window while color is transitioning
-                        self._color_busy_until = loop_time() + desired.duration
                         try:
                             t0 = loop_time()
                             await asyncio.to_thread(
@@ -176,8 +177,11 @@ class LightDevice:
                 except Exception as e:
                     logger.error(f"[{self.ip}] apply error: {e}")
 
-                # Music mode has no rate limit; standard mode allows ~1 cmd/s
-                await asyncio.sleep(CONTROLLER_TICK if self.music_mode else 1.1)
+                self._commands.task_done()
+
+                # Music mode has no rate limit; standard mode allows ~1 cmd/s.
+                if not self.music_mode:
+                    await asyncio.sleep(1.1)
 
         finally:
             logger.debug(f"[{self.ip}] worker stopped")

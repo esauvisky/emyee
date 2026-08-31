@@ -12,7 +12,7 @@ import threading
 from dotenv import load_dotenv
 from loguru import logger
 from spotify_listener import SpotifyChangesListener
-from light_controller import LightsController, Mode
+from light_controller import LightsController
 from device_manager import DeviceManager
 from utils import setup_logging
 from lan_reset import load_tokens
@@ -40,11 +40,9 @@ def _draw_panel(controller: LightsController, rows: int) -> None:
     filled = max(0, min(10, b // 10))
     bar = "▓" * filled + "░" * (10 - filled)
 
-    modes = list(Mode)
-    keys = "  " + "  ".join(f"[{i + 1}] {m.value}" for i, m in enumerate(modes)) + "  [k] color  [↑↓] max bri"
+    keys = "  [↑↓] max brightness"
     song = controller.current_song or "–"
-    trigger = controller.color_trigger.upper()
-    status = f"  \033[1m► {controller.mode.value.upper()}\033[0m  |  ♫ {song}   {bar}  {b}%  |  {trigger}  max:{controller.max_brightness}%"
+    status = f"  \033[1m► ATMOSPHERIC\033[0m  |  ♫ {song}   {bar}  {b}%  |  max:{controller.max_brightness}%"
 
     top = rows - _PANEL_LINES + 1
     out = (
@@ -64,26 +62,12 @@ def _draw_panel(controller: LightsController, rows: int) -> None:
 def main():
     parser = argparse.ArgumentParser(description="Spotify-synced Yeelight controller")
     parser.add_argument(
-        "--mode",
-        choices=[m.value for m in Mode],
-        default="atmospheric",
-        help="Lighting mode (default: atmospheric)",
-    )
-    parser.add_argument(
         "--min-confidence", type=float, default=0.5, metavar="0-1",
         help="Minimum confidence for beats/bars/segments/tatums (default: 0.5)",
     )
     parser.add_argument(
         "--sync-offset", type=float, default=0.0, metavar="MS",
         help="Fire light commands this many ms early (+) or late (-) relative to beat/segment (default: 0)",
-    )
-    parser.add_argument(
-        "--breathe-period", type=int, default=4, metavar="BARS",
-        help="Number of bars per breathe cycle (default: 4)",
-    )
-    parser.add_argument(
-        "--strobe-duty", type=float, default=0.15, metavar="0-1",
-        help="Strobe on-time as a fraction of beat duration (default: 0.15)",
     )
     parser.add_argument(
         "--poll-interval", type=float, default=100.0, metavar="MS",
@@ -102,20 +86,18 @@ def main():
         help="Skip the LAN control off→on cycle before discovery",
     )
     parser.add_argument(
-        "--atmospheric-pulse-on", type=int, default=2, metavar="N",
-        help="Atmospheric mode: number of consecutive beats to pulse (default: 2)",
+        "--atmospheric-pulse-on", type=int, metavar="N",
+        help="Override the atmospheric DB's accented-beat count",
     )
     parser.add_argument(
-        "--atmospheric-pulse-off", type=int, default=2, metavar="N",
-        help="Atmospheric mode: number of silent beats after each pulse group (default: 2)",
-    )
-    parser.add_argument(
-        "--color-trigger",
-        choices=["energy", "section", "key", "energy_bar"],
-        default="energy",
-        help="When to recolor: 'energy' = energy-class boundaries (default), 'energy_bar' = energy change aligned to a bar, 'section' = every section, 'key' = every key change",
+        "--atmospheric-pulse-off", type=int, metavar="N",
+        help="Override the atmospheric DB's subtle-beat count",
     )
     args = parser.parse_args()
+    if args.atmospheric_pulse_on is not None and args.atmospheric_pulse_on < 1:
+        parser.error("--atmospheric-pulse-on must be at least 1")
+    if args.atmospheric_pulse_off is not None and args.atmospheric_pulse_off < 0:
+        parser.error("--atmospheric-pulse-off cannot be negative")
 
     load_dotenv(".env")
     user_id = os.getenv('USER_ID')
@@ -159,17 +141,13 @@ def main():
     spotify_listener.poll_interval = args.poll_interval / 1000
 
     light_controller = LightsController(devices, events_queue)
-    light_controller.mode = Mode[args.mode.upper()]
     light_controller.min_confidence = args.min_confidence
     light_controller.sync_offset = args.sync_offset / 1000
-    light_controller.breathe_period = args.breathe_period
-    light_controller.strobe_duty = args.strobe_duty
     light_controller.atmospheric_pulse_on = args.atmospheric_pulse_on
     light_controller.atmospheric_pulse_off = args.atmospheric_pulse_off
-    light_controller.color_trigger = args.color_trigger
 
     logger.info(
-        f"Mode: {args.mode} | confidence≥{args.min_confidence} | "
+        f"confidence≥{args.min_confidence} | "
         f"sync offset: {args.sync_offset:+.0f}ms | poll: {args.poll_interval:.0f}ms"
     )
 
@@ -195,8 +173,6 @@ def main():
     if is_tty:
         old_settings = termios.tcgetattr(sys.stdin.fileno())
         tty.setcbreak(sys.stdin.fileno())
-        _modes = list(Mode)
-
         def _on_key():
             ch = sys.stdin.read(1)
             if ch == '\x1b':
@@ -210,21 +186,11 @@ def main():
                 finally:
                     fcntl.fcntl(fd, fcntl.F_SETFL, old_fl)
                 if rest == '[A':  # up arrow
-                    light_controller.max_brightness = min(100, light_controller.max_brightness + 5)
+                    light_controller.max_brightness = min(100, light_controller.max_brightness + 10)
                     _draw_panel(light_controller, rows)
                 elif rest == '[B':  # down arrow
-                    light_controller.max_brightness = max(5, light_controller.max_brightness - 5)
+                    light_controller.max_brightness = max(10, light_controller.max_brightness - 10)
                     _draw_panel(light_controller, rows)
-            elif ch.isdigit():
-                idx = int(ch) - 1
-                if 0 <= idx < len(_modes):
-                    light_controller.mode = _modes[idx]
-                    _draw_panel(light_controller, rows)
-            elif ch == 'k':
-                _cycle = ['energy', 'energy_bar', 'section', 'key']
-                cur = light_controller.color_trigger
-                light_controller.color_trigger = _cycle[(_cycle.index(cur) + 1) % len(_cycle)] if cur in _cycle else _cycle[0]
-                _draw_panel(light_controller, rows)
 
         loop.add_reader(sys.stdin.fileno(), _on_key)
 

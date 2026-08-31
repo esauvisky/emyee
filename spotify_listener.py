@@ -22,6 +22,11 @@ class SpotifyChangesListener:
         self.current_progress = 0
         self.last_api_update_time = 0
         self.last_progress = 0
+        self._progress_anchor_mono = time.monotonic()
+        self._progress_anchor_value = 0.0
+        self._progress_correction = 0.0
+        self._progress_correction_target = 0.0
+        self._progress_last_emit_mono = self._progress_anchor_mono
         self.headers = {}
         self.poll_interval: float = SPOTIFY_CHANGES_LISTENER_DELAY
         self.spotify_auth = SpotifyOAuth(
@@ -42,7 +47,16 @@ class SpotifyChangesListener:
         await asyncio.sleep(1)
         waiting_for_api_sync = False
         while True:
-            new_progress = self.current_progress + time.time() - self.last_api_update_time
+            now_mono = time.monotonic()
+            elapsed = now_mono - self._progress_last_emit_mono
+            self._progress_last_emit_mono = now_mono
+            slew = min(1.0, max(0.0, elapsed / 2.0))
+            self._progress_correction += (
+                self._progress_correction_target - self._progress_correction
+            ) * slew
+            new_progress = self._progress_anchor_value + (
+                now_mono - self._progress_anchor_mono
+            ) + self._progress_correction
             if self.last_progress > new_progress and self.last_progress - new_progress < SPOTIFY_CHANGES_LISTENER_FAILURE_DELAY:
                 if not waiting_for_api_sync:
                     logger.debug("Waiting for Spotify progress reference to catch up")
@@ -89,7 +103,13 @@ class SpotifyChangesListener:
 
                     # progress_ms was captured server-side at ~before_request + rtt/2.
                     # Add rtt/2 to get the estimated position at receive_time.
-                    self.current_progress = current_playing["progress_ms"] / 1000 + api_rtt / 2
+                    reported_progress = current_playing["progress_ms"] / 1000 + api_rtt / 2
+                    now_mono = time.monotonic()
+                    predicted_progress = self._progress_anchor_value + (
+                        now_mono - self._progress_anchor_mono
+                    ) + self._progress_correction
+                    self._progress_correction_target += reported_progress - predicted_progress
+                    self.current_progress = reported_progress
                     item = current_playing.get('item') or {}
 
                     if item.get('type') != 'track':
@@ -102,6 +122,13 @@ class SpotifyChangesListener:
 
                     current_track_id = item.get('id')
                     if current_track_id != self.current_track_id:
+                        self._progress_anchor_value = reported_progress
+                        self._progress_anchor_mono = now_mono
+                        self._progress_correction = 0.0
+                        self._progress_correction_target = 0.0
+                        self._progress_last_emit_mono = now_mono
+                        if self.current_track_id is not None:
+                            await self.events_queue.put(EventStop())
                         self.current_track_id = current_track_id
                         song_name = item.get('name', 'Unknown')
                         artist_names = ', '.join(a.get('name', '') for a in item.get('artists', []))
