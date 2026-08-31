@@ -1,5 +1,6 @@
+import bisect
 import random
-import aiohttp
+import os
 from loguru import logger
 import sys
 from typing import Dict, Any, List
@@ -8,11 +9,22 @@ from typing import Dict, Any, List
 RawSpotifyResponse = Dict[str, Any]
 CONTROLLER_TICK = 0.001
 MIN_SEGMENT_DURATION = 0.1
+MIN_ANALYSIS_CONFIDENCE = 0.5
 API_CURRENT_PLAYING = 'https://api.spotify.com/v1/me/player/currently-playing'
 API_AUDIO_ANALYSIS = 'https://api.spotify.com/v1/audio-analysis/'
 SPOTIFY_CHANGES_LISTENER_DELAY = 0.1
 SPOTIFY_CHANGES_LISTENER_FAILURE_DELAY = 1
-SPOTIFY_REDIRECT_URI = 'http://localhost:8000/'
+SPOTIFY_REDIRECT_URI = os.getenv("SPOTIFY_REDIRECT_URI")
+if not SPOTIFY_REDIRECT_URI:
+    SPOTIFY_REDIRECT_HOST = os.getenv("SPOTIFY_REDIRECT_HOST", "127.0.0.1")
+    SPOTIFY_REDIRECT_PORT = os.getenv("SPOTIFY_REDIRECT_PORT")
+    if SPOTIFY_REDIRECT_HOST.startswith("http://") or SPOTIFY_REDIRECT_HOST.startswith("https://"):
+        SPOTIFY_REDIRECT_HOST = SPOTIFY_REDIRECT_HOST.split("://", 1)[1]
+
+    if SPOTIFY_REDIRECT_PORT:
+        SPOTIFY_REDIRECT_URI = f"http://{SPOTIFY_REDIRECT_HOST}:{SPOTIFY_REDIRECT_PORT}/"
+    else:
+        SPOTIFY_REDIRECT_URI = "http://127.0.0.1:8022/"
 SPOTIFY_SCOPE = 'user-read-currently-playing,user-read-playback-state'
 API_REQUEST_INTERVAL = 1
 COLORS = [(255, 102, 129), (204, 0, 203), (232, 62, 62), (102, 0, 102), (0, 0, 204), (59, 0, 104), (0, 0, 102),
@@ -41,7 +53,7 @@ def get_vibrant_color(current_hue):
     return new_color
 
 
-def setup_logging(log_lvl="DEBUG", options={}):
+def setup_logging(log_lvl="DEBUG", options={}, sink=None):
     file = options.get("file", False)
     function = options.get("function", False)
     process = options.get("process", False)
@@ -57,7 +69,7 @@ def setup_logging(log_lvl="DEBUG", options={}):
 
     logger.configure(
         handlers=[{
-            "sink": lambda x: print(x, end=""),
+            "sink": sink if sink is not None else (lambda x: print(x, end="")),
             "level": log_lvl,
             "format": log_fmt,
             "colorize": True,
@@ -71,53 +83,14 @@ def setup_logging(log_lvl="DEBUG", options={}):
         ]
     )  # type: ignore # yapf: disable
 
-def get_new_color(current_color):
-    """
-    Generates a new color, ensuring it is different from the current color.
-    """
-    # index = COLORS.index(current_color)
-    # new_color = COLORS[(index+1) % len(COLORS)]
-
-    colors = list(COLORS)
-    if current_color in colors:
-        colors.remove(current_color)  # Remove the current color to ensure the new color is different
-    new_color = random.choice(colors)
-    ## Optionally, adjust the new color slightly to add variety
-    # adjusted_color = tuple(max(0, min(255, component + random.randint(-20, 20))) for component in new_color)
-    return new_color
-
-
-async def get_current_playing(session: aiohttp.ClientSession, token: str) -> RawSpotifyResponse:
-    """
-    Retrieves the currently playing track from Spotify.
-    """
-    headers = {'Authorization': f'Bearer {token}'}
-    url = 'https://api.spotify.com/v1/me/player/currently-playing'
-    async with session.get(url, headers=headers) as response:
-        return await response.json()
-
-
-async def get_audio_analysis(session: aiohttp.ClientSession, token: str, track_id: str) -> RawSpotifyResponse:
-    """
-    Retrieves the audio analysis for a given track ID from Spotify.
-    """
-    headers = {'Authorization': f'Bearer {token}'}
-    url = f'https://api.spotify.com/v1/audio-analysis/{track_id}'
-    async with session.get(url, headers=headers) as response:
-        return await response.json()
-
 def get_random_item(items):
     return random.choice(items)
 
 def get_next_item(items, current_time, key="start"):
-    items_sorted_by_start = sorted(items, key=lambda x: x[key])
-    remaining_items = [item for item in items_sorted_by_start if item[key] > current_time]
-    return remaining_items[1] if len(remaining_items) > 1 else None
-
-def get_current_item(items, current_time, key="start"):
-    items_sorted_by_start = sorted(items, key=lambda x: x[key])
-    remaining_items = [item for item in items_sorted_by_start if item[key] > current_time]
-    return remaining_items[0] if len(remaining_items) > 0 else None
+    # items must be pre-sorted by key; uses bisect for O(log n) lookup
+    starts = [item[key] for item in items]
+    idx = bisect.bisect_right(starts, current_time)
+    return items[idx] if idx < len(items) else None
 
 
 def calculate_segment_loudness(segment: Dict[str, Any]) -> float:
@@ -208,13 +181,6 @@ def visualize_segments(bars: List[float]):
     print(f"Standard Deviation: {std_confidence:.4f} seconds")
     print(f"Min confidence: {min_confidence:.4f} seconds")
     print(f"Max confidence: {max_confidence:.4f} seconds")
-    # Calculate percentiles
-    percentiles = [10, 25, 50, 75, 90]
-    percentile_values = confidences.quantile([p/100 for p in percentiles])
-
-    print("Percentile confidences:")
-    for p, value in zip(percentiles, percentile_values):
-        print(f"{p}th percentile: {value:.4f} seconds")
     # Calculate percentiles
     percentiles = [10, 25, 50, 75, 90]
     percentile_values = confidences.quantile([p/100 for p in percentiles])

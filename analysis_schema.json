@@ -1,0 +1,281 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Audio Analysis Schema",
+  "description": "A schema for representing detailed audio analysis data from a music track.",
+  "type": "object",
+  "properties": {
+    "meta": {
+      "type": "object",
+      "description": "Metadata about the analysis process itself.",
+      "properties": {
+        "analyzer_version": {
+          "type": "string",
+          "description": "Version of the audio analysis software.",
+          "examples": ["4.0.0"]
+        },
+        "platform": {
+          "type": "string",
+          "description": "The operating system platform where the analysis was run.",
+          "examples": ["Linux"]
+        },
+        "detailed_status": {
+          "type": "string",
+          "description": "A human-readable status of the analysis.",
+          "examples": ["OK"]
+        },
+        "status_code": {
+          "type": "integer",
+          "description": "A status code for the analysis (0 typically indicates success).",
+          "examples": [0]
+        },
+        "timestamp": {
+          "type": "integer",
+          "description": "The UNIX timestamp of when the analysis was performed.",
+          "examples": [1608199267]
+        },
+        "analysis_time": {
+          "type": "number",
+          "description": "The duration of the analysis in seconds.",
+          "examples": [15.08733]
+        },
+        "input_process": {
+          "type": "string",
+          "description": "Details about the input audio processing.",
+          "examples": ["libvorbisfile L+R 44100->22050"]
+        }
+      },
+      "required": ["analyzer_version", "platform", "status_code", "timestamp", "analysis_time"]
+    },
+    "track": {
+      "type": "object",
+      "description": "High-level audio features for the entire track.",
+      "properties": {
+        "num_samples": {
+          "type": "integer",
+          "description": "Total number of audio samples in the track.",
+          "examples": [6493578]
+        },
+        "duration": {
+          "type": "number",
+          "description": "The total duration of the track in seconds.",
+          "examples": [294.49332]
+        },
+        "sample_md5": {
+          "type": "string",
+          "description": "MD5 hash of the audio sample data.",
+          "examples": [""]
+        },
+        "offset_seconds": {
+          "type": "integer",
+          "description": "Offset in seconds from the start of the audio file for analysis.",
+          "examples": [0]
+        },
+        "window_seconds": {
+          "type": "integer",
+          "description": "The size of the analysis window in seconds.",
+          "examples": [0]
+        },
+        "analysis_sample_rate": {
+          "type": "integer",
+          "description": "The sample rate used for the analysis.",
+          "examples": [22050]
+        },
+        "analysis_channels": {
+          "type": "integer",
+          "description": "The number of audio channels used for analysis.",
+          "examples": [1]
+        },
+        "end_of_fade_in": {
+          "type": "number",
+          "description": "The time in seconds where the track's fade-in is complete.",
+          "examples": [0.50544]
+        },
+        "start_of_fade_out": {
+          "type": "number",
+          "description": "The time in seconds where the track's fade-out begins.",
+          "examples": [283.93362]
+        },
+        "loudness": {
+          "type": "number",
+          "description": "The overall loudness of the track in LUFS.",
+          "examples": [-5.141]
+        },
+        "tempo": {
+          "type": "number",
+          "description": "The estimated tempo of the track in Beats Per Minute (BPM).",
+          "examples": [102.517]
+        },
+        "tempo_confidence": {
+          "type": "number",
+          "description": "Confidence score for the tempo estimation (0.0 to 1.0).",
+          "examples": [0.741]
+        },
+        "time_signature": {
+          "type": "integer",
+          "description": "The estimated number of beats per bar.",
+          "examples": [4]
+        },
+        "time_signature_confidence": {
+          "type": "number",
+          "description": "Confidence score for the time signature estimation (0.0 to 1.0).",
+          "examples": [1.0]
+        },
+        "key": {
+          "type": "integer",
+          "description": "The estimated key of the track using Pitch Class notation (0=C, 1=C♯/D♭, ..., 11=B).",
+          "examples": [2]
+        },
+        "key_confidence": {
+          "type": "number",
+          "description": "Confidence score for the key estimation (0.0 to 1.0).",
+          "examples": [0.305]
+        },
+        "mode": {
+          "type": "integer",
+          "description": "The mode of the track (0 for minor, 1 for major).",
+          "examples": [0]
+        },
+        "mode_confidence": {
+          "type": "number",
+          "description": "Confidence score for the mode estimation (0.0 to 1.0).",
+          "examples": [0.568]
+        },
+        "codestring": { "type": "string", "description": "Proprietary data string for audio fingerprinting." },
+        "code_version": { "type": "number", "description": "Version of the codestring algorithm." },
+        "echoprintstring": { "type": "string", "description": "Proprietary data string for Echo Print fingerprinting." },
+        "echoprint_version": { "type": "number", "description": "Version of the Echo Print algorithm." },
+        "synchstring": { "type": "string", "description": "Proprietary data string for synchronization." },
+        "synch_version": { "type": "number", "description": "Version of the synchstring algorithm." },
+        "rhythmstring": { "type": "string", "description": "Proprietary data string representing rhythm." },
+        "rhythm_version": { "type": "number", "description": "Version of the rhythmstring algorithm." }
+      },
+      "required": ["duration", "loudness", "tempo", "key", "mode", "time_signature"]
+    },
+    "bars": {
+      "type": "array",
+      "description": "An array of bar markers, indicating the start and duration of each bar.",
+      "items": { "$ref": "#/definitions/timeInterval" }
+    },
+    "beats": {
+      "type": "array",
+      "description": "An array of beat markers, indicating the start and duration of each beat.",
+      "items": { "$ref": "#/definitions/timeInterval" }
+    },
+    "tatums": {
+      "type": "array",
+      "description": "An array of tatum markers, the smallest time interval between successive notes.",
+      "items": { "$ref": "#/definitions/timeInterval" }
+    },
+    "sections": {
+      "type": "array",
+      "description": "An array defining distinct sections of the song (e.g., intro, verse, chorus).",
+      "items": {
+        "type": "object",
+        "properties": {
+          "start": { "type": "number" },
+          "duration": { "type": "number" },
+          "confidence": { "type": "number" },
+          "loudness": { "type": "number" },
+          "tempo": { "type": "number" },
+          "tempo_confidence": { "type": "number" },
+          "key": { "type": "integer" },
+          "key_confidence": { "type": "number" },
+          "mode": { "type": "integer" },
+          "mode_confidence": { "type": "number" },
+          "time_signature": { "type": "integer" },
+          "time_signature_confidence": { "type": "number" }
+        },
+        "required": ["start", "duration", "confidence", "loudness", "tempo", "key", "mode", "time_signature"],
+        "examples": [
+          {
+            "start": 12.99362,
+            "duration": 18.57326,
+            "confidence": 0.829,
+            "loudness": -6.958,
+            "tempo": 103.551,
+            "tempo_confidence": 0.814,
+            "key": 7,
+            "key_confidence": 0.509,
+            "mode": 1,
+            "mode_confidence": 0.427,
+            "time_signature": 4,
+            "time_signature_confidence": 1.0
+          }
+        ]
+      }
+    },
+    "segments": {
+      "type": "array",
+      "description": "An array of audio segments, each with detailed acoustic properties.",
+      "items": {
+        "type": "object",
+        "properties": {
+          "start": { "type": "number", "description": "The start time of the segment in seconds." },
+          "duration": { "type": "number", "description": "The duration of the segment in seconds." },
+          "confidence": { "type": "number", "description": "Confidence score for the segment's boundaries." },
+          "loudness_start": { "type": "number", "description": "Loudness at the start of the segment." },
+          "loudness_max_time": { "type": "number", "description": "Time offset from the segment start to the point of maximum loudness." },
+          "loudness_max": { "type": "number", "description": "The maximum loudness in the segment." },
+          "loudness_end": { "type": "number", "description": "Loudness at the end of the segment." },
+          "pitches": {
+            "type": "array",
+            "description": "A chroma feature vector representing the 12 pitch classes.",
+            "minItems": 12,
+            "maxItems": 12,
+            "items": { "type": "number" }
+          },
+          "timbre": {
+            "type": "array",
+            "description": "A vector of timbre features (e.g., MFCCs).",
+            "minItems": 12,
+            "maxItems": 12,
+            "items": { "type": "number" }
+          }
+        },
+        "required": ["start", "duration", "loudness_max", "pitches", "timbre"],
+        "examples": [
+          {
+            "start": 0.65755,
+            "duration": 0.1273,
+            "confidence": 1.0,
+            "loudness_start": -38.871,
+            "loudness_max_time": 0.00499,
+            "loudness_max": -19.071,
+            "loudness_end": 0.0,
+            "pitches": [0.278, 1.0, 0.14, 0.028, 0.027, 0.092, 0.108, 0.026, 0.042, 0.042, 0.056, 0.181],
+            "timbre": [31.32, -48.953, -111.248, 63.386, -59.44, -102.906, -40.754, -29.257, -5.026, 28.219, -35.194, 10.523]
+          }
+        ]
+      }
+    }
+  },
+  "required": ["meta", "track", "bars", "beats", "sections", "segments", "tatums"],
+  "definitions": {
+    "timeInterval": {
+      "type": "object",
+      "description": "Represents a time interval with a start, duration, and confidence score.",
+      "properties": {
+        "start": {
+          "type": "number",
+          "description": "The start time of the interval in seconds."
+        },
+        "duration": {
+          "type": "number",
+          "description": "The duration of the interval in seconds."
+        },
+        "confidence": {
+          "type": "number",
+          "description": "The confidence score for this interval's accuracy (0.0 to 1.0)."
+        }
+      },
+      "required": ["start", "duration", "confidence"],
+      "examples": [
+        {
+          "start": 1.39604,
+          "duration": 2.31278,
+          "confidence": 0.264
+        }
+      ]
+    }
+  }
+}

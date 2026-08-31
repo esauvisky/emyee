@@ -1,17 +1,10 @@
 import asyncio
 from dataclasses import dataclass
 from typing import Optional
+from colorsys import hsv_to_rgb
 from yeelight import Bulb
 from loguru import logger
 
-from utils import CONTROLLER_TICK
-
-# light_device.py
-import asyncio
-from dataclasses import dataclass
-from typing import Optional
-from yeelight import Bulb
-from loguru import logger
 from utils import CONTROLLER_TICK
 
 
@@ -28,12 +21,29 @@ class LightDevice:
     def __init__(self, bulb: Bulb):
         self.bulb = bulb
         self.ip = bulb._ip
-        self.model = bulb.get_capabilities()["model"] # type: ignore
+        try:
+            caps = bulb.get_capabilities() or {}
+            self.model = caps.get("model", "unknown")
+        except Exception:
+            self.model = "unknown"
+        self.music_mode: bool = False
+        self._latency_samples: list = []
         self._desired: Optional[DesiredState] = None
         self._update_event = asyncio.Event()
         self._stop_event = asyncio.Event()
         self._worker_task: Optional[asyncio.Task] = None
         self._color_busy_until: float = 0.0           # monotonic deadline while HSV is flowing
+
+    @property
+    def estimated_latency(self) -> float:
+        if not self._latency_samples:
+            return 0.02
+        return sum(self._latency_samples) / len(self._latency_samples)
+
+    def _record_latency(self, rtt: float):
+        self._latency_samples.append(rtt)
+        if len(self._latency_samples) > 10:
+            self._latency_samples.pop(0)
 
     def _color_busy(self) -> bool:
         return asyncio.get_event_loop().time() < self._color_busy_until
@@ -100,34 +110,65 @@ class LightDevice:
 
                 try:
 
+                    loop_time = asyncio.get_event_loop().time
                     if desired.mode == "hsv":
                         logger.trace(f"[{self.ip}] apply HSV ({desired.hue},{desired.saturation},{desired.brightness}) "
                                      f"over {desired.duration:.3f}s")
                         # Mark busy window while color is transitioning
-                        self._color_busy_until = asyncio.get_event_loop().time() + desired.duration + CONTROLLER_TICK*2
-                        await asyncio.to_thread(
-                            self.bulb.set_hsv,
-                            int(desired.hue),
-                            int(desired.saturation),
-                            int(desired.brightness),
-                            duration=int(desired.duration * 1000),
-                        )
+                        self._color_busy_until = loop_time() + desired.duration
+                        try:
+                            t0 = loop_time()
+                            await asyncio.to_thread(
+                                self.bulb.set_hsv,
+                                int(desired.hue),
+                                int(desired.saturation),
+                                int(desired.brightness),
+                                duration=int(desired.duration * 1000),
+                            )
+                            self._record_latency(loop_time() - t0)
+                        except Exception as hsv_error:
+                            logger.warning(
+                                f"[{self.ip}] set_hsv failed ({hsv_error}), trying set_rgb fallback"
+                            )
+                            hue = int(desired.hue) % 360
+                            sat = max(0, min(100, int(desired.saturation)))
+                            val = max(0, min(100, int(desired.brightness)))
+                            rgb = tuple(int(round(component * 255)) for component in hsv_to_rgb(hue / 360, sat / 100, val / 100))
+                            try:
+                                t0 = loop_time()
+                                await asyncio.to_thread(
+                                    self.bulb.set_rgb,
+                                    *rgb,
+                                    duration=int(desired.duration * 1000),
+                                )
+                                self._record_latency(loop_time() - t0)
+                            except Exception as rgb_error:
+                                logger.error(
+                                    f"[{self.ip}] set_rgb fallback failed (set_hsv_error={hsv_error}, set_rgb_error={rgb_error})"
+                                )
+                                raise
 
                     elif desired.mode == "brightness":
                         logger.trace(f"[{self.ip}] apply brightness {desired.brightness}% over {desired.duration:.3f}s")
+                        t0 = loop_time()
                         await asyncio.to_thread(
                             self.bulb.set_brightness,
                             int(desired.brightness),
                             duration=int(desired.duration * 1000),
                         )
+                        self._record_latency(loop_time() - t0)
 
                     elif desired.mode == "on":
                         logger.trace(f"[{self.ip}] turn_on over {desired.duration:.3f}s")
+                        t0 = loop_time()
                         await asyncio.to_thread(self.bulb.turn_on, duration=int(desired.duration * 1000))
+                        self._record_latency(loop_time() - t0)
 
                     elif desired.mode == "off":
                         logger.trace(f"[{self.ip}] turn_off over {desired.duration:.3f}s")
+                        t0 = loop_time()
                         await asyncio.to_thread(self.bulb.turn_off, duration=int(desired.duration * 1000))
+                        self._record_latency(loop_time() - t0)
 
                 except asyncio.CancelledError:
                     # If we ever cancel the worker, propagate
@@ -135,8 +176,8 @@ class LightDevice:
                 except Exception as e:
                     logger.error(f"[{self.ip}] apply error: {e}")
 
-                # Small pacing to avoid hammering device back-to-back
-                await asyncio.sleep(CONTROLLER_TICK)
+                # Music mode has no rate limit; standard mode allows ~1 cmd/s
+                await asyncio.sleep(CONTROLLER_TICK if self.music_mode else 1.1)
 
         finally:
             logger.debug(f"[{self.ip}] worker stopped")
