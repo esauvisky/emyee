@@ -13,6 +13,7 @@ import hashlib
 import json
 import socket
 import time
+import threading
 
 from loguru import logger
 
@@ -74,26 +75,34 @@ def _miio(ip: str, token_hex: str, method: str, params, timeout: float = 3.0) ->
 
 
 def load_tokens(path: str = 'tokens.json') -> dict:
-    """Load {ip: token_hex} from a plain-text JSON file."""
+    """Load {ip: token_hex} from a JSON file (list of device objects or {ip: token} dict)."""
     with open(path) as f:
-        return json.load(f)
+        data = json.load(f)
+    if isinstance(data, list):
+        return {d['localip']: d['token'] for d in data if 'localip' in d and 'token' in d}
+    return data
+
+
+def reset_device(ip: str, token_hex: str, retries: int = 3, pause: float = 1.5) -> bool:
+    """Cycle LAN control off→on for a single device, retrying up to *retries* times.
+    Waits *pause* seconds after a successful reset. Returns True on success."""
+    if not _CRYPTO_OK:
+        logger.warning("cryptography package not installed — skipping LAN reset for {}", ip)
+        return False
+    for attempt in range(1, retries + 1):
+        try:
+            _miio(ip, token_hex, 'set_ps', ['cfg_lan_ctrl', '0'])
+            time.sleep(0.2)
+            _miio(ip, token_hex, 'set_ps', ['cfg_lan_ctrl', '1'])
+            logger.info("LAN ctrl reset OK: {} (attempt {}/{})", ip, attempt, retries)
+            time.sleep(pause)
+            return True
+        except Exception as e:
+            logger.warning("LAN reset {}/{} failed for {}: {}", attempt, retries, ip, e)
+    return False
 
 
 def reset_lan_control(tokens: dict, pause: float = 1.5) -> None:
-    """Cycle LAN control off→on for every IP in *tokens* to force port 55443 open."""
-    if not _CRYPTO_OK:
-        logger.warning("cryptography package not installed — skipping LAN reset")
-        return
-
+    """Cycle LAN control off→on for every IP in *tokens* sequentially."""
     for ip, token in tokens.items():
-        try:
-            _miio(ip, token, 'set_ps', ['cfg_lan_ctrl', '0'])
-            logger.debug("LAN ctrl off: {}", ip)
-            time.sleep(0.2)
-            _miio(ip, token, 'set_ps', ['cfg_lan_ctrl', '1'])
-            logger.info("LAN ctrl reset OK: {}", ip)
-        except Exception as e:
-            logger.warning("LAN reset failed for {}: {}", ip, e)
-
-    logger.info("Waiting {:.1f}s for bulbs to reopen port 55443...", pause)
-    time.sleep(pause)
+        reset_device(ip, token, pause=pause)

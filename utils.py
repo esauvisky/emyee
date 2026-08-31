@@ -69,10 +69,11 @@ def setup_logging(log_lvl="DEBUG", options={}, sink=None):
 
     logger.configure(
         handlers=[{
-            "sink": sink if sink is not None else (lambda x: print(x, end="")),
+            "sink": sink if sink is not None else sys.stderr,
             "level": log_lvl,
             "format": log_fmt,
             "colorize": True,
+            "enqueue": True,
             "backtrace": True,
             "diagnose": True
         }],

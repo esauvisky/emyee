@@ -4,6 +4,7 @@ import socket
 from yeelight import discover_bulbs, Bulb
 from loguru import logger
 from light_device import LightDevice
+from lan_reset import reset_device
 
 def get_real_local_ip_for(target_ip: str) -> str:
     """Resolve a interface de rede real que chega na lâmpada (ignora docker/loopback)."""
@@ -17,10 +18,11 @@ def get_real_local_ip_for(target_ip: str) -> str:
         s.close()
 
 class DeviceManager:
-    def __init__(self, effect="smooth", auto_on=False, enable_music_mode=True):
+    def __init__(self, effect="smooth", auto_on=False, enable_music_mode=True, tokens: dict = None):
         self.effect = effect
         self.auto_on = auto_on
         self.enable_music_mode = enable_music_mode
+        self.tokens = tokens or {}
 
     def discover_devices(self) -> List[LightDevice]:
         logger.info("Discovering bulbs...")
@@ -30,6 +32,8 @@ class DeviceManager:
         for bulb_info in bulbs_info:
             ip = bulb_info["ip"]
             port = bulb_info.get("port", 55443)
+            if ip in self.tokens:
+                reset_device(ip, self.tokens[ip])
             try:
                 bulb = Bulb(ip, port, effect=self.effect, auto_on=True)
 
@@ -41,6 +45,10 @@ class DeviceManager:
                     #     pass
                     local_ip = get_real_local_ip_for(ip)
                     try:
+                        bulb.stop_music(ip=local_ip)
+                    except Exception as e:
+                        logger.warning(f"Failed to stop music mode")
+                    try:
                         # passa o IP correto explicitamente pra evitar bind no docker
                         bulb.start_music(ip=local_ip)
                         logger.info(f"Music mode enabled on {ip} via interface {local_ip}")
@@ -48,13 +56,14 @@ class DeviceManager:
                     except Exception as me:
                         logger.warning(f"Music mode failed on {ip} ({me}). Falling back to standard mode.")
 
-                    try:
-                        bulb.start_music()
-                        music_mode_active = True
-                        logger.info(f"Music mode enabled on {ip}")
-                    except:
-                        pass
+                    if not music_mode_active:
+                        try:
+                            bulb.start_music()
+                            logger.info(f"Music mode enabled on {ip}")
+                        except Exception as fallback_error:
+                            logger.warning(f"Music mode fallback failed on {ip} ({fallback_error}). Using standard mode.")
 
+                    music_mode_active = True
                 light_device = LightDevice(bulb)
                 light_device.music_mode = music_mode_active
                 devices.append(light_device)

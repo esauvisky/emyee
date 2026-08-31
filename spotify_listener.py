@@ -40,13 +40,16 @@ class SpotifyChangesListener:
 
     async def _emit_progress(self):
         await asyncio.sleep(1)
+        waiting_for_api_sync = False
         while True:
             new_progress = self.current_progress + time.time() - self.last_api_update_time
             if self.last_progress > new_progress and self.last_progress - new_progress < SPOTIFY_CHANGES_LISTENER_FAILURE_DELAY:
-                # logger.trace("Spotify API request rate limit exceeded. Waiting...")
+                if not waiting_for_api_sync:
+                    logger.debug("Waiting for Spotify progress reference to catch up")
+                    waiting_for_api_sync = True
                 await asyncio.sleep(self.poll_interval)
-                logger.trace("Spotify API request rate limit exceeded. Waiting...")
                 continue
+            waiting_for_api_sync = False
             await self.events_queue.put(EventAdjustProgressTime(new_progress))
             self.last_progress = new_progress
             await asyncio.sleep(self.poll_interval)
@@ -100,12 +103,28 @@ class SpotifyChangesListener:
                     current_track_id = item.get('id')
                     if current_track_id != self.current_track_id:
                         self.current_track_id = current_track_id
+                        song_name = item.get('name', 'Unknown')
+                        artist_names = ', '.join(a.get('name', '') for a in item.get('artists', []))
+                        album_name = (item.get('album') or {}).get('name', '')
+                        logger.info(
+                            "Now playing: {} — {} | album={} | id={} | progress={:.2f}s",
+                            song_name, artist_names or 'Unknown artist', album_name or 'Unknown album',
+                            current_track_id, self.current_progress,
+                        )
                         analysis = await self._get_audio_analysis(session, current_track_id)
                         if analysis is None:
                             logger.warning("No audio analysis available for track id {}", current_track_id)
                             await self.events_queue.put(EventStop())
+                            self.last_api_update_time = receive_time
                             continue
-                        await self.events_queue.put(EventSongChanged(analysis, self.current_progress, song_name=item.get('name', '')))
+                        await self.events_queue.put(EventSongChanged(
+                            analysis,
+                            self.current_progress,
+                            song_name=song_name,
+                            artist_names=artist_names,
+                            album_name=album_name,
+                            track_id=current_track_id,
+                        ))
                     self.last_api_update_time = receive_time
                 await asyncio.sleep(self.poll_interval)
             await asyncio.sleep(0)
@@ -219,4 +238,3 @@ class SpotifyChangesListener:
                 return None
             response.raise_for_status()
             return await response.json()
-

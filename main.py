@@ -2,19 +2,23 @@
 import argparse
 import asyncio
 import colorsys
+import fcntl
+import math
 import os
 import sys
 import tty
 import termios
+import threading
 from dotenv import load_dotenv
 from loguru import logger
 from spotify_listener import SpotifyChangesListener
 from light_controller import LightsController, Mode
 from device_manager import DeviceManager
 from utils import setup_logging
-from lan_reset import load_tokens, reset_lan_control
+from lan_reset import load_tokens
 
 _PANEL_LINES = 5
+_terminal_lock = threading.RLock()
 
 
 def _get_rows() -> int:
@@ -27,7 +31,7 @@ def _get_rows() -> int:
 def _draw_panel(controller: LightsController, rows: int) -> None:
     h, s, b = controller.panel_state()
 
-    dim = b / 100
+    dim = math.log1p(b) / math.log1p(100) if b > 0 else 0
     r, g, bc = colorsys.hsv_to_rgb(h / 360, s / 100, 1.0)
     ri, gi, bi = int(r * 255 * dim), int(g * 255 * dim), int(bc * 255 * dim)
 
@@ -37,9 +41,10 @@ def _draw_panel(controller: LightsController, rows: int) -> None:
     bar = "▓" * filled + "░" * (10 - filled)
 
     modes = list(Mode)
-    keys = "  " + "  ".join(f"[{i + 1}] {m.value}" for i, m in enumerate(modes))
+    keys = "  " + "  ".join(f"[{i + 1}] {m.value}" for i, m in enumerate(modes)) + "  [k] color  [↑↓] max bri"
     song = controller.current_song or "–"
-    status = f"  \033[1m► {controller.mode.value.upper()}\033[0m  |  ♫ {song}   {bar}  {b}%"
+    trigger = controller.color_trigger.upper()
+    status = f"  \033[1m► {controller.mode.value.upper()}\033[0m  |  ♫ {song}   {bar}  {b}%  |  {trigger}  max:{controller.max_brightness}%"
 
     top = rows - _PANEL_LINES + 1
     out = (
@@ -51,8 +56,9 @@ def _draw_panel(controller: LightsController, rows: int) -> None:
         + f"\033[{top + 4};1H\033[2K" + status
         + "\0338"
     )
-    sys.stderr.write(out)
-    sys.stderr.flush()
+    with _terminal_lock:
+        sys.stderr.write(out)
+        sys.stderr.flush()
 
 
 def main():
@@ -95,6 +101,20 @@ def main():
         "--no-lan-reset", action="store_true",
         help="Skip the LAN control off→on cycle before discovery",
     )
+    parser.add_argument(
+        "--atmospheric-pulse-on", type=int, default=2, metavar="N",
+        help="Atmospheric mode: number of consecutive beats to pulse (default: 2)",
+    )
+    parser.add_argument(
+        "--atmospheric-pulse-off", type=int, default=2, metavar="N",
+        help="Atmospheric mode: number of silent beats after each pulse group (default: 2)",
+    )
+    parser.add_argument(
+        "--color-trigger",
+        choices=["energy", "section", "key", "energy_bar"],
+        default="energy",
+        help="When to recolor: 'energy' = energy-class boundaries (default), 'energy_bar' = energy change aligned to a bar, 'section' = every section, 'key' = every key change",
+    )
     args = parser.parse_args()
 
     load_dotenv(".env")
@@ -102,16 +122,37 @@ def main():
     client_id = os.getenv('CLIENT_ID')
     client_secret = os.getenv('CLIENT_SECRET')
 
+    rows = _get_rows()
+    is_tty = sys.stdin.isatty() and sys.stderr.isatty()
+    setup_logging("TRACE")
+    old_settings = None
+
+    tokens = {}
     if not args.no_lan_reset:
         if os.path.exists(args.tokens):
             tokens = load_tokens(args.tokens)
-            logger.info(f"Resetting LAN control for {len(tokens)} bulb(s) via miIO...")
-            reset_lan_control(tokens)
+            logger.info(f"LAN reset enabled for {len(tokens)} bulb(s) — will reset each before connecting")
         else:
             logger.warning(f"tokens file not found at {args.tokens!r} — skipping LAN reset (use --no-lan-reset to suppress)")
 
-    device_manager = DeviceManager(enable_music_mode=not args.no_music_mode)
+    device_manager = DeviceManager(enable_music_mode=not args.no_music_mode, tokens=tokens)
     devices = device_manager.discover_devices()
+
+    if is_tty and devices:
+        sys.stderr.flush()
+        sys.stderr.write("\nDiscovered devices:\n")
+        for i, d in enumerate(devices):
+            sys.stderr.write(f"  [{i + 1}] {d.ip}  ({d.model})\n")
+        sys.stderr.write("Connect to which? (comma-separated numbers, or Enter for all): ")
+        sys.stderr.flush()
+        _raw = sys.stdin.readline().strip()
+        if _raw:
+            try:
+                _idxs = [int(x.strip()) - 1 for x in _raw.split(',')]
+                devices = [devices[i] for i in _idxs if 0 <= i < len(devices)]
+                logger.info(f"Using {len(devices)} selected device(s): {[d.ip for d in devices]}")
+            except (ValueError, IndexError):
+                logger.warning("Invalid selection — using all devices")
 
     events_queue = asyncio.Queue()
     spotify_listener = SpotifyChangesListener(user_id, client_id, client_secret, events_queue)
@@ -123,15 +164,14 @@ def main():
     light_controller.sync_offset = args.sync_offset / 1000
     light_controller.breathe_period = args.breathe_period
     light_controller.strobe_duty = args.strobe_duty
+    light_controller.atmospheric_pulse_on = args.atmospheric_pulse_on
+    light_controller.atmospheric_pulse_off = args.atmospheric_pulse_off
+    light_controller.color_trigger = args.color_trigger
 
     logger.info(
         f"Mode: {args.mode} | confidence≥{args.min_confidence} | "
         f"sync offset: {args.sync_offset:+.0f}ms | poll: {args.poll_interval:.0f}ms"
     )
-
-    rows = _get_rows()
-    is_tty = sys.stdin.isatty() and sys.stderr.isatty()
-    old_settings = None
 
     if is_tty:
         # Reserve bottom 5 lines for the panel; move cursor to top of scroll region
@@ -139,13 +179,13 @@ def main():
         sys.stderr.flush()
 
         def _panel_sink(msg):
-            sys.stderr.write(str(msg))
-            _draw_panel(light_controller, rows)
+            with _terminal_lock:
+                sys.stderr.write(str(msg))
+                sys.stderr.flush()
+                _draw_panel(light_controller, rows)
 
         setup_logging("TRACE", sink=_panel_sink)
         _draw_panel(light_controller, rows)
-    else:
-        setup_logging("TRACE")
 
     loop = asyncio.get_event_loop()
 
@@ -159,11 +199,32 @@ def main():
 
         def _on_key():
             ch = sys.stdin.read(1)
-            if ch.isdigit():
+            if ch == '\x1b':
+                fd = sys.stdin.fileno()
+                old_fl = fcntl.fcntl(fd, fcntl.F_GETFL)
+                fcntl.fcntl(fd, fcntl.F_SETFL, old_fl | os.O_NONBLOCK)
+                try:
+                    rest = sys.stdin.read(2)
+                except (BlockingIOError, IOError):
+                    rest = ''
+                finally:
+                    fcntl.fcntl(fd, fcntl.F_SETFL, old_fl)
+                if rest == '[A':  # up arrow
+                    light_controller.max_brightness = min(100, light_controller.max_brightness + 5)
+                    _draw_panel(light_controller, rows)
+                elif rest == '[B':  # down arrow
+                    light_controller.max_brightness = max(5, light_controller.max_brightness - 5)
+                    _draw_panel(light_controller, rows)
+            elif ch.isdigit():
                 idx = int(ch) - 1
                 if 0 <= idx < len(_modes):
                     light_controller.mode = _modes[idx]
                     _draw_panel(light_controller, rows)
+            elif ch == 'k':
+                _cycle = ['energy', 'energy_bar', 'section', 'key']
+                cur = light_controller.color_trigger
+                light_controller.color_trigger = _cycle[(_cycle.index(cur) + 1) % len(_cycle)] if cur in _cycle else _cycle[0]
+                _draw_panel(light_controller, rows)
 
         loop.add_reader(sys.stdin.fileno(), _on_key)
 
@@ -181,6 +242,8 @@ def main():
                 _periodic_redraw(),
             )
         )
+    except KeyboardInterrupt:
+        logger.info("Stopping...")
     finally:
         if is_tty:
             loop.remove_reader(sys.stdin.fileno())
