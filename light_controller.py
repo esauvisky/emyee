@@ -17,7 +17,7 @@ from utils import (
 import random
 import numpy as np
 
-from atmospheric import profile_for
+from atmospheric import profile_for, pulses_for
 from light_device import LightDevice
 
 class LightsController:
@@ -377,26 +377,31 @@ class LightsController:
             next_beat = self.beats[next_beat_idx]
             deadline = time.monotonic() + max(0.0, next_beat['start'] - current_time)
             profile_index, profile = profile_for(energy_score, bar_index)
-            accent_beats = self.atmospheric_pulse_on
-            subtle_beats = self.atmospheric_pulse_off
-            if accent_beats is None:
-                accent_beats = profile["accent_beats"]
-            if subtle_beats is None:
-                subtle_beats = profile["subtle_beats"]
-            cycle = max(1, accent_beats + subtle_beats)
-            in_accent = next_beat_idx % cycle < accent_beats
+            pulses = pulses_for(
+                profile, self.atmospheric_pulse_on, self.atmospheric_pulse_off,
+            )
+            pulse, attack, hold, release = pulses[next_beat_idx % len(pulses)]
             spike = max(1, int(self.map_brightness(self.segments[seg_idx], energy_score) * fade))
             if next_beat_idx % max(1, self.beats_per_measure) == 0:
                 spike = min(100, int(spike * profile["downbeat_boost"]))
             low = max(1, int((1 + energy_score * 5) * fade))
-            high = max(low + 1, spike if in_accent else int(spike * profile["subtle_scale"]))
-            logger.debug(
-                "Atmospheric event energy={} profile={} beat={} accent={} brightness={}→{}",
-                round(energy_score * 4), profile_index, next_beat_idx,
-                in_accent, high, low,
+            high = max(low + 1, int(spike * pulse))
+            energy_level = round(energy_score * 4)
+            energy_color = ("blue", "cyan", "green", "yellow", "red")[energy_level]
+            logger.opt(colors=True).debug(
+                f"<bold>Beat {{beat:>3}}</bold> | <{energy_color}>E{{energy}}</{energy_color}> P{{profile}} | "
+                "pulse <magenta>{pulse:>4.2f}</magenta> | "
+                "env <cyan>{attack:>4.2f} {hold:>4.2f} {release:>4.2f}</cyan> | "
+                "brightness <green>{high:>3}%</green> → <dim>{low:>3}%</dim>",
+                beat=next_beat_idx, energy=energy_level,
+                profile=profile_index, pulse=pulse, attack=attack, hold=hold,
+                release=release, high=high, low=low,
             )
             self._beat_task = asyncio.create_task(
-                self._scheduled_beat_pulse(deadline, high, low, next_beat.get('duration', 0.5))
+                self._scheduled_beat_pulse(
+                    deadline, high, low, next_beat.get('duration', 0.5),
+                    (attack, hold, release),
+                )
             )
 
         # Bar transition → recompute min-segment duration to track tempo changes
@@ -428,13 +433,15 @@ class LightsController:
         spike: int,
         base: int,
         beat_duration: float,
+        envelope: tuple[float, float, float],
     ):
         await asyncio.sleep(max(0.0, deadline - self._device_latency() - time.monotonic()))
-        await self.set_parameters(0.05, brightness=spike, deadline=deadline)
-        base_deadline = deadline + max(0.05, beat_duration * 0.2)
+        attack, hold, release = envelope
+        await self.set_parameters(beat_duration * attack, brightness=spike, deadline=deadline)
+        base_deadline = deadline + beat_duration * (attack + hold)
         await asyncio.sleep(max(0.0, base_deadline - self._device_latency() - time.monotonic()))
         await self.set_parameters(
-            max(0.1, beat_duration * 0.6),
+            beat_duration * release,
             brightness=base,
             deadline=base_deadline,
         )

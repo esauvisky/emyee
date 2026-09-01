@@ -150,7 +150,6 @@ class LightDevice:
                                 raise
 
                     elif desired.mode == "brightness":
-                        logger.trace(f"[{self.ip}] apply brightness {desired.brightness}% over {desired.duration:.3f}s")
                         t0 = loop_time()
                         await asyncio.to_thread(
                             self.bulb.set_brightness,

@@ -57,7 +57,7 @@ The application will discover and initialize the Yeelight bulbs on your network,
 
 ## Customization
 
-Playback uses the atmospheric beat-pulse implementation in `light_controller.py`. Edit `ATMOSPHERIC_DB` in `atmospheric.py` to tune the accented/subtle beat cycle, subtle strength, and downbeat boost for each energy level. Profiles rotate every four analyzed bars. The standalone `pattern_tester.py` remains available for manually experimenting with the patterns in `patterns.py`, but those patterns are not used during Spotify playback.
+Playback uses the atmospheric beat-pulse implementation in `light_controller.py`. Edit `ATMOSPHERIC_DB` in `atmospheric.py`; every pulse is `(strength, attack, hold, release)`, with timing measured in fractions of one beat. Because each pulse owns its envelope, one profile can mix slow swells, instant flashes, held peaks, and soft releases. Profiles swap every four analyzed bars. The standalone `pattern_tester.py` remains available for manually experimenting with the patterns in `patterns.py`, but those patterns are not used during Spotify playback.
 
 ## License
 
