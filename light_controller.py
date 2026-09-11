@@ -19,6 +19,7 @@ import numpy as np
 
 from atmospheric import profile_for, pulses_for
 from light_device import LightDevice
+from sections import detect_sections
 
 class LightsController:
     def __init__(self, devices: List[LightDevice], events_queue: asyncio.Queue):
@@ -124,10 +125,14 @@ class LightsController:
             json.dump(self.analysis, f, indent=4)
 
         conf = self.min_confidence
-        self.sections = self.analysis['sections']
         self.bars = sorted(
             [b for b in self.analysis['bars'] if b.get('confidence', 1.0) >= conf],
             key=lambda x: x['start'],
+        )
+        self.sections = detect_sections(self.analysis, self.bars)
+        logger.debug(
+            "Custom section starts: {}",
+            ' '.join(f"{index}:{section['start']:.2f}s" for index, section in enumerate(self.sections)),
         )
         bar_starts = [bar['start'] for bar in self.bars]
         self._section_bar_starts = []
@@ -150,7 +155,7 @@ class LightsController:
         track = self.analysis.get('track', {})
         logger.info(
             "Analysis saved: {} — {} | duration={:.2f}s | start progress={:.2f}s | "
-            "sections={} bars={} beats={} segments={}",
+            "custom sections={} bars={} beats={} segments={}",
             event.song_name or 'Unknown track', event.artist_names or 'Unknown artist',
             track.get('duration', 0.0), event.progress_time_ms,
             len(self.sections), len(self.bars), len(self.beats), len(self.analysis.get('segments', [])),
@@ -318,7 +323,7 @@ class LightsController:
 
             if important_boundary and next_section.get('confidence', 1.0) >= self.min_confidence:
                 idx_at_section = bisect.bisect_left(self._beat_starts, next_section_start)
-                lead_beats = round((1.0 - self._section_energies[next_section_idx]) * 4)
+                lead_beats = max(2, round((1.0 - self._section_energies[next_section_idx]) * 8))
                 target_beat_idx = max(0, idx_at_section - lead_beats)
                 pre_trans_start = self._beat_starts[target_beat_idx]
 
@@ -372,46 +377,47 @@ class LightsController:
         self._last_segment_idx = seg_idx
         next_beat_idx = bisect.bisect_right(self._beat_starts, current_time)
         if next_beat_idx < len(self.beats) and next_beat_idx != self._beat_scheduled_for:
-            self._cancel_beat_task()
-            self._beat_scheduled_for = next_beat_idx
             next_beat = self.beats[next_beat_idx]
-            deadline = time.monotonic() + max(0.0, next_beat['start'] - current_time)
-            profile_index, profile = profile_for(energy_score, bar_index)
-            pulses = pulses_for(
-                profile, self.atmospheric_pulse_on, self.atmospheric_pulse_off,
-            )
-            pulse, attack, hold, release = pulses[next_beat_idx % len(pulses)]
-            spike = max(1, int(self.map_brightness(self.segments[seg_idx], energy_score) * fade))
-            if next_beat_idx % max(1, self.beats_per_measure) == 0:
-                spike = min(100, int(spike * profile["downbeat_boost"]))
-            low = max(1, int((1 + energy_score * 5) * fade))
-            high = max(low + 1, int(spike * pulse))
-            energy_level = round(energy_score * 4)
-            energy_color = ("blue", "cyan", "green", "yellow", "red")[energy_level]
-            logger.opt(colors=True).debug(
-                f"<bold>Beat {{beat:>3}}</bold> | <{energy_color}>E{{energy}}</{energy_color}> P{{profile}} | "
-                "pulse <magenta>{pulse:>4.2f}</magenta> | "
-                "env <cyan>{attack:>4.2f} {hold:>4.2f} {release:>4.2f}</cyan> | "
-                "brightness <green>{high:>3}%</green> → <dim>{low:>3}%</dim>",
-                beat=next_beat_idx, energy=energy_level,
-                profile=profile_index, pulse=pulse, attack=attack, hold=hold,
-                release=release, high=high, low=low,
-            )
-            self._beat_task = asyncio.create_task(
-                self._scheduled_beat_pulse(
-                    deadline, high, low, next_beat.get('duration', 0.5),
-                    (attack, hold, release),
+            fire_in = next_beat['start'] - current_time
+            if fire_in < 0.05:
+                # Beat is essentially "now" — skip it; this happens during Spotify catch-up
+                # bursts where song time jumps ahead rapidly and next beats appear stale.
+                self._beat_scheduled_for = next_beat_idx
+            else:
+                self._cancel_beat_task()
+                self._beat_scheduled_for = next_beat_idx
+                deadline = time.monotonic() + fire_in
+                profile_index, profile = profile_for(energy_score, bar_index)
+                pulses = pulses_for(
+                    profile, self.atmospheric_pulse_on, self.atmospheric_pulse_off,
                 )
-            )
+                pulse, attack, hold, release = pulses[next_beat_idx % len(pulses)]
+                spike = max(1, int(self.map_brightness(self.segments[seg_idx], energy_score) * fade))
+                if next_beat_idx % max(1, self.beats_per_measure) == 0:
+                    spike = min(100, int(spike * profile["downbeat_boost"]))
+                low = max(1, int((1 + energy_score * 5) * fade))
+                high = max(low + 1, int(spike * pulse))
+                high, shown_high, shown_low = self._visible_pulse_brightness(high, low)
+                energy_level = round(energy_score * 4)
+                energy_color = ("blue", "cyan", "green", "yellow", "red")[energy_level]
+                logger.opt(colors=True).debug(
+                    f"<bold>Beat {{beat:>3}}</bold> | <{energy_color}>E{{energy}}</{energy_color}> P{{profile}} | "
+                    "pulse <magenta>{pulse:>4.2f}</magenta> | "
+                    "env <cyan>{attack:>4.2f} {hold:>4.2f} {release:>4.2f}</cyan> | "
+                    "brightness <green>{high:>3}%</green> → <dim>{low:>3}%</dim>",
+                    beat=next_beat_idx, energy=energy_level,
+                    profile=profile_index, pulse=pulse, attack=attack, hold=hold,
+                    release=release, high=shown_high, low=shown_low,
+                )
+                self._beat_task = asyncio.create_task(
+                    self._scheduled_beat_pulse(
+                        deadline, high, low, next_beat.get('duration', 0.5),
+                        (attack, hold, release),
+                    )
+                )
 
         # Bar transition → recompute min-segment duration to track tempo changes
         if next_bar and self.last_next_bar != next_bar and next_bar['confidence'] > 0.8:
-            next_bar_duration = (next_bar["duration"] - (current_time - next_bar['start']))
-            logger.warning(
-                f"Transitioning from bar {self.bars.index(self.last_next_bar)} "
-                f"to bar {self.bars.index(next_bar)} in {next_bar_duration:.2f}s"
-            )
-
             self.min_segment_duration, self.beats_per_measure, self.avg_measure_duration = \
                 min_segment_duration_from_future_measures(self.beats, self.bars, current_time)
 
@@ -477,31 +483,8 @@ class LightsController:
         return len(self.sections) - 1
 
     def _build_section_color_indexes(self, section_count: int) -> set[int]:
-        if not section_count:
-            return set()
-        scores = []
-        for index in range(1, section_count):
-            previous = self.sections[index - 1]
-            current = self.sections[index]
-            energy = abs(self._section_energies[index] - self._section_energies[index - 1])
-            loudness = min(1.0, abs(previous.get('loudness', -20) - current.get('loudness', -20)) / 12)
-            tempo = min(1.0, abs(previous.get('tempo', 120) - current.get('tempo', 120)) / 30)
-            key = float(previous.get('key', -1) != current.get('key', -1))
-            mode = float(previous.get('mode', -1) != current.get('mode', -1))
-            timbre = 0.0
-            if index < len(self._section_timbres):
-                left, right = self._section_timbres[index - 1], self._section_timbres[index]
-                denominator = np.linalg.norm(left) * np.linalg.norm(right)
-                if denominator:
-                    timbre = 1 - float(np.dot(left, right) / denominator)
-            score = 0.40 * energy + 0.25 * loudness + 0.10 * tempo + 0.10 * key + 0.05 * mode + 0.10 * timbre
-            scores.append((index, score))
-        threshold = 0.28
-        indexes = {0} | {index for index, score in scores if score >= threshold}
-        logger.debug(
-            "Color boundary scores: {}",
-            ' '.join(f"{index}:{score:.2f}{'*' if index in indexes else ''}" for index, score in scores),
-        )
+        indexes = set(range(section_count))
+        logger.debug("Color transitions at every section boundary ({} sections)", section_count)
         return indexes
 
     def _device_latency(self) -> float:
@@ -622,4 +605,20 @@ class LightsController:
 
     def _quantize_brightness(self, brightness: float) -> int:
         scaled_brightness = brightness * self.max_brightness / 100
-        return max(1, min(100, round(scaled_brightness / 10) * 10 or 1))
+        return max(1, min(100, round(scaled_brightness / 5) * 5 or 1))
+
+    def _visible_pulse_brightness(self, high: int, low: int) -> tuple[int, int, int]:
+        low_quantized = self._quantize_brightness(low)
+        for candidate in range(high, 101):
+            high_quantized = self._quantize_brightness(candidate)
+            if high_quantized > low_quantized:
+                return candidate, high_quantized, low_quantized
+        return high, self._quantize_brightness(high), low_quantized
+
+
+if __name__ == "__main__":
+    controller = object.__new__(LightsController)
+    controller.max_brightness = 100
+    assert controller._visible_pulse_brightness(4, 3)[1:] == (10, 5)
+    assert controller._visible_pulse_brightness(14, 3)[1:] == (15, 5)
+    print("pulse quantization: ok")

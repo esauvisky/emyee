@@ -62,16 +62,16 @@ def _draw_panel(controller: LightsController, rows: int) -> None:
 def main():
     parser = argparse.ArgumentParser(description="Spotify-synced Yeelight controller")
     parser.add_argument(
-        "--min-confidence", type=float, default=0.5, metavar="0-1",
-        help="Minimum confidence for beats/bars/segments/tatums (default: 0.5)",
+        "--min-confidence", type=float, default=0.0, metavar="0-1",
+        help="Minimum confidence for beats/bars/segments/tatums (default: 0)",
     )
     parser.add_argument(
         "--sync-offset", type=float, default=0.0, metavar="MS",
         help="Fire light commands this many ms early (+) or late (-) relative to beat/segment (default: 0)",
     )
     parser.add_argument(
-        "--poll-interval", type=float, default=100.0, metavar="MS",
-        help="Progress event interval in ms — lower = more responsive, higher = less CPU (default: 100)",
+        "--poll-interval", type=float, default=20.0, metavar="MS",
+        help="Progress event interval in ms — lower = more responsive, higher = less CPU (default: 20)",
     )
     parser.add_argument(
         "--no-music-mode", action="store_true",
@@ -84,6 +84,10 @@ def main():
     parser.add_argument(
         "--no-lan-reset", action="store_true",
         help="Skip the LAN control off→on cycle before discovery",
+    )
+    parser.add_argument(
+        "--ip", metavar="IP", action="append", dest="ips",
+        help="Connect directly to this bulb IP (skip discovery); repeat for multiple bulbs",
     )
     parser.add_argument(
         "--atmospheric-pulse-on", type=int, metavar="N",
@@ -118,23 +122,10 @@ def main():
             logger.warning(f"tokens file not found at {args.tokens!r} — skipping LAN reset (use --no-lan-reset to suppress)")
 
     device_manager = DeviceManager(enable_music_mode=not args.no_music_mode, tokens=tokens)
-    devices = device_manager.discover_devices()
-
-    if is_tty and devices:
-        sys.stderr.flush()
-        sys.stderr.write("\nDiscovered devices:\n")
-        for i, d in enumerate(devices):
-            sys.stderr.write(f"  [{i + 1}] {d.ip}  ({d.model})\n")
-        sys.stderr.write("Connect to which? (comma-separated numbers, or Enter for all): ")
-        sys.stderr.flush()
-        _raw = sys.stdin.readline().strip()
-        if _raw:
-            try:
-                _idxs = [int(x.strip()) - 1 for x in _raw.split(',')]
-                devices = [devices[i] for i in _idxs if 0 <= i < len(devices)]
-                logger.info(f"Using {len(devices)} selected device(s): {[d.ip for d in devices]}")
-            except (ValueError, IndexError):
-                logger.warning("Invalid selection — using all devices")
+    if args.ips:
+        devices = device_manager.connect_to_ips(args.ips)
+    else:
+        devices = device_manager.discover_devices()
 
     events_queue = asyncio.Queue()
     spotify_listener = SpotifyChangesListener(user_id, client_id, client_secret, events_queue)
@@ -186,10 +177,10 @@ def main():
                 finally:
                     fcntl.fcntl(fd, fcntl.F_SETFL, old_fl)
                 if rest == '[A':  # up arrow
-                    light_controller.max_brightness = min(100, light_controller.max_brightness + 10)
+                    light_controller.max_brightness = min(100, light_controller.max_brightness + 5)
                     _draw_panel(light_controller, rows)
                 elif rest == '[B':  # down arrow
-                    light_controller.max_brightness = max(10, light_controller.max_brightness - 10)
+                    light_controller.max_brightness = max(5, light_controller.max_brightness - 5)
                     _draw_panel(light_controller, rows)
 
         loop.add_reader(sys.stdin.fileno(), _on_key)
