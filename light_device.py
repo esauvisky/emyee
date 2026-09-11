@@ -18,15 +18,17 @@ class DesiredState:
     dispatch_at: float | None = None
 
 
-class LightDevice:
-    def __init__(self, bulb: Bulb):
-        self.bulb = bulb
-        self.ip = bulb._ip
-        try:
-            caps = bulb.get_capabilities() or {}
-            self.model = caps.get("model", "unknown")
-        except Exception:
-            self.model = "unknown"
+class BaseLightDevice:
+    """Queue and scheduling shell shared by every light backend.
+
+    Subclasses provide _apply() for their protocol and _post_command_delay()
+    for their rate limit. Command coalescing, dispatch_at scheduling, stale
+    command dropping and latency tracking all live here.
+    """
+
+    def __init__(self, ip: str, model: str = "unknown"):
+        self.ip = ip
+        self.model = model
         self.music_mode: bool = False
         self._latency_samples: list = []
         self._commands = asyncio.Queue()
@@ -89,6 +91,15 @@ class LightDevice:
     async def turn_off(self, duration: float = 0.05):
         self._commands.put_nowait(DesiredState(mode="off", duration=float(duration)))
 
+    # ---- Backend hooks ----
+
+    async def _apply(self, desired: DesiredState):
+        raise NotImplementedError
+
+    def _post_command_delay(self) -> float:
+        """Seconds to wait after each command before pulling the next one."""
+        return 0.0
+
     # ---- Worker loop ----
 
     async def _worker(self):
@@ -112,64 +123,7 @@ class LightDevice:
                     continue
 
                 try:
-
-                    loop_time = asyncio.get_event_loop().time
-                    if desired.mode == "hsv":
-                        logger.trace(f"[{self.ip}] apply HSV ({desired.hue},{desired.saturation},{desired.brightness}) "
-                                     f"over {desired.duration:.3f}s")
-                        try:
-                            t0 = loop_time()
-                            await asyncio.to_thread(
-                                self.bulb.set_hsv,
-                                int(desired.hue),
-                                int(desired.saturation),
-                                int(desired.brightness),
-                                duration=int(desired.duration * 1000),
-                            )
-                            self._record_latency(loop_time() - t0)
-                        except Exception as hsv_error:
-                            logger.warning(
-                                f"[{self.ip}] set_hsv failed ({hsv_error}), trying set_rgb fallback"
-                            )
-                            hue = int(desired.hue) % 360
-                            sat = max(0, min(100, int(desired.saturation)))
-                            val = max(0, min(100, int(desired.brightness)))
-                            rgb = tuple(int(round(component * 255)) for component in hsv_to_rgb(hue / 360, sat / 100, val / 100))
-                            try:
-                                t0 = loop_time()
-                                await asyncio.to_thread(
-                                    self.bulb.set_rgb,
-                                    *rgb,
-                                    duration=int(desired.duration * 1000),
-                                )
-                                self._record_latency(loop_time() - t0)
-                            except Exception as rgb_error:
-                                logger.error(
-                                    f"[{self.ip}] set_rgb fallback failed (set_hsv_error={hsv_error}, set_rgb_error={rgb_error})"
-                                )
-                                raise
-
-                    elif desired.mode == "brightness":
-                        t0 = loop_time()
-                        await asyncio.to_thread(
-                            self.bulb.set_brightness,
-                            int(desired.brightness),
-                            duration=int(desired.duration * 1000),
-                        )
-                        self._record_latency(loop_time() - t0)
-
-                    elif desired.mode == "on":
-                        logger.trace(f"[{self.ip}] turn_on over {desired.duration:.3f}s")
-                        t0 = loop_time()
-                        await asyncio.to_thread(self.bulb.turn_on, duration=int(desired.duration * 1000))
-                        self._record_latency(loop_time() - t0)
-
-                    elif desired.mode == "off":
-                        logger.trace(f"[{self.ip}] turn_off over {desired.duration:.3f}s")
-                        t0 = loop_time()
-                        await asyncio.to_thread(self.bulb.turn_off, duration=int(desired.duration * 1000))
-                        self._record_latency(loop_time() - t0)
-
+                    await self._apply(desired)
                 except asyncio.CancelledError:
                     # If we ever cancel the worker, propagate
                     raise
@@ -178,9 +132,82 @@ class LightDevice:
 
                 self._commands.task_done()
 
-                # Music mode has no rate limit; standard mode allows ~1 cmd/s.
-                if not self.music_mode:
-                    await asyncio.sleep(1.1)
+                delay = self._post_command_delay()
+                if delay > 0:
+                    await asyncio.sleep(delay)
 
         finally:
             logger.debug(f"[{self.ip}] worker stopped")
+
+
+class LightDevice(BaseLightDevice):
+    def __init__(self, bulb: Bulb):
+        try:
+            caps = bulb.get_capabilities() or {}
+            model = caps.get("model", "unknown")
+        except Exception:
+            model = "unknown"
+        super().__init__(bulb._ip, model)
+        self.bulb = bulb
+
+    def _post_command_delay(self) -> float:
+        # Music mode has no rate limit; standard mode allows ~1 cmd/s.
+        return 0.0 if self.music_mode else 1.1
+
+    async def _apply(self, desired: DesiredState):
+        loop_time = asyncio.get_event_loop().time
+        if desired.mode == "hsv":
+            logger.trace(f"[{self.ip}] apply HSV ({desired.hue},{desired.saturation},{desired.brightness}) "
+                         f"over {desired.duration:.3f}s")
+            try:
+                t0 = loop_time()
+                await asyncio.to_thread(
+                    self.bulb.set_hsv,
+                    int(desired.hue),
+                    int(desired.saturation),
+                    int(desired.brightness),
+                    duration=int(desired.duration * 1000),
+                )
+                self._record_latency(loop_time() - t0)
+            except Exception as hsv_error:
+                logger.warning(
+                    f"[{self.ip}] set_hsv failed ({hsv_error}), trying set_rgb fallback"
+                )
+                hue = int(desired.hue) % 360
+                sat = max(0, min(100, int(desired.saturation)))
+                val = max(0, min(100, int(desired.brightness)))
+                rgb = tuple(int(round(component * 255)) for component in hsv_to_rgb(hue / 360, sat / 100, val / 100))
+                try:
+                    t0 = loop_time()
+                    await asyncio.to_thread(
+                        self.bulb.set_rgb,
+                        *rgb,
+                        duration=int(desired.duration * 1000),
+                    )
+                    self._record_latency(loop_time() - t0)
+                except Exception as rgb_error:
+                    logger.error(
+                        f"[{self.ip}] set_rgb fallback failed (set_hsv_error={hsv_error}, set_rgb_error={rgb_error})"
+                    )
+                    raise
+
+        elif desired.mode == "brightness":
+            t0 = loop_time()
+            await asyncio.to_thread(
+                self.bulb.set_brightness,
+                int(desired.brightness),
+                duration=int(desired.duration * 1000),
+            )
+            self._record_latency(loop_time() - t0)
+
+        elif desired.mode == "on":
+            logger.trace(f"[{self.ip}] turn_on over {desired.duration:.3f}s")
+            t0 = loop_time()
+            await asyncio.to_thread(self.bulb.turn_on, duration=int(desired.duration * 1000))
+            self._record_latency(loop_time() - t0)
+
+        elif desired.mode == "off":
+            logger.trace(f"[{self.ip}] turn_off over {desired.duration:.3f}s")
+            t0 = loop_time()
+            await asyncio.to_thread(self.bulb.turn_off, duration=int(desired.duration * 1000))
+            self._record_latency(loop_time() - t0)

@@ -18,11 +18,11 @@ import random
 import numpy as np
 
 from atmospheric import profile_for, pulses_for
-from light_device import LightDevice
+from light_device import BaseLightDevice
 from sections import detect_sections
 
 class LightsController:
-    def __init__(self, devices: List[LightDevice], events_queue: asyncio.Queue):
+    def __init__(self, devices: List[BaseLightDevice], events_queue: asyncio.Queue):
         self.devices = devices
         self.events_queue = events_queue
         self._pending_event = None
