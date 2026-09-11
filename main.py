@@ -90,6 +90,14 @@ def main():
         help="Connect directly to this bulb IP (skip discovery); repeat for multiple bulbs",
     )
     parser.add_argument(
+        "--tasmota", metavar="IP", action="append", dest="tasmota_ips",
+        help="Drive a Tasmota RGB light over HTTP at this IP; repeat for multiple lights",
+    )
+    parser.add_argument(
+        "--tasmota-no-sleep", action="store_true",
+        help="Set Sleep 0 on each Tasmota light (halves command latency, more idle power, persisted to flash)",
+    )
+    parser.add_argument(
         "--atmospheric-pulse-on", type=int, metavar="N",
         help="Override the atmospheric DB's accented-beat count",
     )
@@ -122,10 +130,15 @@ def main():
             logger.warning(f"tokens file not found at {args.tokens!r} — skipping LAN reset (use --no-lan-reset to suppress)")
 
     device_manager = DeviceManager(enable_music_mode=not args.no_music_mode, tokens=tokens)
+    devices = []
     if args.ips:
-        devices = device_manager.connect_to_ips(args.ips)
-    else:
-        devices = device_manager.discover_devices()
+        devices += device_manager.connect_to_ips(args.ips)
+    elif not args.tasmota_ips:
+        devices += device_manager.discover_devices()
+    if args.tasmota_ips:
+        devices += device_manager.connect_to_tasmota(
+            args.tasmota_ips, disable_wifi_sleep=args.tasmota_no_sleep
+        )
 
     events_queue = asyncio.Queue()
     spotify_listener = SpotifyChangesListener(user_id, client_id, client_secret, events_queue)

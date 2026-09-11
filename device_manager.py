@@ -4,6 +4,7 @@ import socket
 from yeelight import discover_bulbs, Bulb
 from loguru import logger
 from light_device import LightDevice
+from tasmota_device import TasmotaDevice
 from lan_reset import reset_device
 
 def get_real_local_ip_for(target_ip: str) -> str:
@@ -55,6 +56,17 @@ class DeviceManager:
             except Exception as e:
                 logger.error(f"Failed to initialize bulb at {ip}:{port}: {e}")
         logger.info(f"Connected to {len(devices)} LightDevice(s).")
+        return devices
+
+    def connect_to_tasmota(self, ips: List[str], disable_wifi_sleep: bool = False) -> List[TasmotaDevice]:
+        logger.info("Connecting to {} Tasmota light(s): {}", len(ips), ips)
+        devices: List[TasmotaDevice] = []
+        for ip in ips:
+            try:
+                devices.append(TasmotaDevice(ip, disable_wifi_sleep=disable_wifi_sleep).connect())
+            except Exception as e:
+                logger.error(f"Failed to initialize Tasmota light at {ip}: {e}")
+        logger.info(f"Connected to {len(devices)} Tasmota light(s).")
         return devices
 
     def discover_devices(self) -> List[LightDevice]:
