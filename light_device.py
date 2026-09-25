@@ -10,9 +10,9 @@ from loguru import logger
 @dataclass
 class DesiredState:
     mode: str
-    hue: Optional[int] = None
-    saturation: Optional[int] = None
-    brightness: Optional[int] = None
+    hue: Optional[float] = None
+    saturation: Optional[float] = None
+    brightness: Optional[float] = None
     duration: float = 0.05
     replaceable: bool = False
     dispatch_at: float | None = None
@@ -65,8 +65,8 @@ class BaseLightDevice:
 
     # ---- Public API (called by controller) ----
 
-    async def set_brightness(self, brightness: int, duration: float = 0.05, dispatch_at: float | None = None):
-        command = DesiredState(mode="brightness", brightness=int(brightness), duration=float(duration), replaceable=True, dispatch_at=dispatch_at)
+    async def set_brightness(self, brightness: float, duration: float = 0.05, dispatch_at: float | None = None):
+        command = DesiredState(mode="brightness", brightness=float(brightness), duration=float(duration), replaceable=True, dispatch_at=dispatch_at)
         pending = list(self._commands._queue)
         kept = [item for item in pending if not (getattr(item, 'replaceable', False) and item.mode == "brightness")]
         removed = len(pending) - len(kept)
@@ -78,11 +78,11 @@ class BaseLightDevice:
                 self._commands._finished.set()
         self._commands.put_nowait(command)
 
-    async def set_hsv(self, hue: int, saturation: int, brightness: int, duration: float = 0.05, dispatch_at: float | None = None):
+    async def set_hsv(self, hue: float, saturation: float, brightness: float, duration: float = 0.05, dispatch_at: float | None = None):
         self._commands.put_nowait(DesiredState(mode="hsv",
-                                               hue=int(hue),
-                                               saturation=int(saturation),
-                                               brightness=int(brightness),
+                                               hue=float(hue),
+                                               saturation=float(saturation),
+                                               brightness=float(brightness),
                                                duration=float(duration), dispatch_at=dispatch_at))
 
     async def turn_on(self, duration: float = 0.05):

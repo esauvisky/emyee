@@ -15,6 +15,12 @@ DEFAULT_PORT = 6053
 # the Yeelight non-music limit and tighter than Tasmota's HTTP round-trip.
 MIN_COMMAND_INTERVAL = 0.02
 CONNECT_TIMEOUT = 20.0
+# ESPHome applies gamma_correct (2.8 by default on the Athom firmware), so the
+# bottom of the range is perceptually crushed: 0% is properly off and 1% is
+# indistinguishable from it. The controller's 0-100 is remapped onto
+# [MIN_VISIBLE_BRIGHTNESS, 100] rather than clamped, so the 1-6% pulse troughs
+# stay distinguishable from each other instead of all collapsing onto the floor.
+MIN_VISIBLE_BRIGHTNESS = 12.0
 
 
 class ESPHomeDevice(BaseLightDevice):
@@ -93,15 +99,19 @@ class ESPHomeDevice(BaseLightDevice):
     def _post_command_delay(self) -> float:
         return self.min_command_interval
 
+    def _visible(self, brightness: float) -> float:
+        b = max(0.0, min(100.0, brightness))
+        return MIN_VISIBLE_BRIGHTNESS + b / 100 * (100.0 - MIN_VISIBLE_BRIGHTNESS)
+
     async def _apply(self, desired: DesiredState):
         # light_command is fire-and-forget (no ack), so there is no round trip
         # to time — estimated_latency keeps its default rather than collapsing
         # to zero and pulling every dispatch_at forward.
         if desired.mode == "hsv":
-            hue = int(desired.hue) % 360
-            sat = max(0, min(100, int(desired.saturation)))
-            bri = max(0, min(100, int(desired.brightness)))
-            logger.trace(f"[{self.ip}] apply HSV ({hue},{sat},{bri}) over {desired.duration:.3f}s")
+            hue = desired.hue % 360
+            sat = max(0.0, min(100.0, desired.saturation))
+            bri = self._visible(desired.brightness)
+            logger.trace(f"[{self.ip}] apply HSV ({hue:.1f},{sat:.1f},{bri:.1f}) over {desired.duration:.3f}s")
             self._client.light_command(
                 key=self._key,
                 state=True,
@@ -113,8 +123,8 @@ class ESPHomeDevice(BaseLightDevice):
             )
 
         elif desired.mode == "brightness":
-            bri = max(0, min(100, int(desired.brightness)))
-            logger.trace(f"[{self.ip}] apply brightness {bri} over {desired.duration:.3f}s")
+            bri = self._visible(desired.brightness)
+            logger.trace(f"[{self.ip}] apply brightness {bri:.1f} over {desired.duration:.3f}s")
             # state=True on every command: brightness 0 would otherwise latch
             # the entity off and a later brightness-only command would not
             # bring it back, leaving a pulse trough permanently dark.

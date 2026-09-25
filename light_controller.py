@@ -234,14 +234,14 @@ class LightsController:
         self._segment_starts = [s['start'] for s in self.segments]
         self._last_segment_idx = -1
 
-    def map_brightness(self, segment, section_energy_score: float = 0.5) -> int:
+    def map_brightness(self, segment, section_energy_score: float = 0.5) -> float:
         loudness = 10 ** (segment["loudness_start"] / 20)
         span = self._loudness_max - self._loudness_min
         raw = 0.5 if span == 0 else (loudness - self._loudness_min) / span
         raw = max(0.0, min(1.0, raw))
-        floor = max(1, 5 + int(section_energy_score * 25))
-        ceiling = 55 + int(section_energy_score * 45)
-        return max(1, min(100, int(floor * (ceiling / floor) ** raw)))
+        floor = 5 + section_energy_score * 25
+        ceiling = 55 + section_energy_score * 45
+        return max(0.0, min(100.0, floor * (ceiling / floor) ** raw))
 
     def _fade_multiplier(self, current_time: float) -> float:
         if self._fade_in_end > 0 and current_time < self._fade_in_end:
@@ -392,22 +392,21 @@ class LightsController:
                     profile, self.atmospheric_pulse_on, self.atmospheric_pulse_off,
                 )
                 pulse, attack, hold, release = pulses[next_beat_idx % len(pulses)]
-                spike = max(1, int(self.map_brightness(self.segments[seg_idx], energy_score) * fade))
+                spike = self.map_brightness(self.segments[seg_idx], energy_score) * fade
                 if next_beat_idx % max(1, self.beats_per_measure) == 0:
-                    spike = min(100, int(spike * profile["downbeat_boost"]))
-                low = max(1, int((1 + energy_score * 5) * fade))
-                high = max(low + 1, int(spike * pulse))
-                high, shown_high, shown_low = self._visible_pulse_brightness(high, low)
+                    spike = min(100.0, spike * profile["downbeat_boost"])
+                low = (1 + energy_score * 5) * fade
+                high = max(low, spike * pulse)
                 energy_level = round(energy_score * 4)
                 energy_color = ("blue", "cyan", "green", "yellow", "red")[energy_level]
                 logger.opt(colors=True).debug(
                     f"<bold>Beat {{beat:>3}}</bold> | <{energy_color}>E{{energy}}</{energy_color}> P{{profile}} | "
                     "pulse <magenta>{pulse:>4.2f}</magenta> | "
                     "env <cyan>{attack:>4.2f} {hold:>4.2f} {release:>4.2f}</cyan> | "
-                    "brightness <green>{high:>3}%</green> → <dim>{low:>3}%</dim>",
+                    "brightness <green>{high:>5.1f}%</green> → <dim>{low:>5.1f}%</dim>",
                     beat=next_beat_idx, energy=energy_level,
                     profile=profile_index, pulse=pulse, attack=attack, hold=hold,
-                    release=release, high=shown_high, low=shown_low,
+                    release=release, high=self._scale_brightness(high), low=self._scale_brightness(low),
                 )
                 self._beat_task = asyncio.create_task(
                     self._scheduled_beat_pulse(
@@ -436,8 +435,8 @@ class LightsController:
     async def _scheduled_beat_pulse(
         self,
         deadline: float,
-        spike: int,
-        base: int,
+        spike: float,
+        base: float,
         beat_duration: float,
         envelope: tuple[float, float, float],
     ):
@@ -504,7 +503,7 @@ class LightsController:
     async def set_parameters(
         self,
         duration: float = 0.05,
-        brightness: int | None = None,
+        brightness: float | None = None,
         change_color: bool = False,
         wait_before_ms: int = 0,
         target_hue: int | None = None,
@@ -522,7 +521,15 @@ class LightsController:
             new_saturation = self._current_params['saturation']
 
         if brightness is not None:
-            new_brightness = self._quantize_brightness(brightness)
+            # A brightness-only command resolves its unset colour fields from the
+            # bulb's in-flight target, which cuts a long colour transition short
+            # and snaps the new hue in early. Drop beat pulses that would land
+            # before the colour has finished crossing.
+            if not change_color and self._color_trans_duration > 0:
+                lands_at = deadline if deadline is not None else time.monotonic()
+                if lands_at < self._color_trans_start_time + self._color_trans_duration:
+                    return
+            new_brightness = self._scale_brightness(brightness)
         else:
             new_brightness = self._current_params['brightness']
 
@@ -603,22 +610,5 @@ class LightsController:
             ))
         await asyncio.sleep(0)
 
-    def _quantize_brightness(self, brightness: float) -> int:
-        scaled_brightness = brightness * self.max_brightness / 100
-        return max(1, min(100, round(scaled_brightness / 5) * 5 or 1))
-
-    def _visible_pulse_brightness(self, high: int, low: int) -> tuple[int, int, int]:
-        low_quantized = self._quantize_brightness(low)
-        for candidate in range(high, 101):
-            high_quantized = self._quantize_brightness(candidate)
-            if high_quantized > low_quantized:
-                return candidate, high_quantized, low_quantized
-        return high, self._quantize_brightness(high), low_quantized
-
-
-if __name__ == "__main__":
-    controller = object.__new__(LightsController)
-    controller.max_brightness = 100
-    assert controller._visible_pulse_brightness(4, 3)[1:] == (10, 5)
-    assert controller._visible_pulse_brightness(14, 3)[1:] == (15, 5)
-    print("pulse quantization: ok")
+    def _scale_brightness(self, brightness: float) -> float:
+        return max(0.0, min(100.0, brightness * self.max_brightness / 100))
