@@ -94,6 +94,18 @@ def main():
         help="Drive a Tasmota RGB light over HTTP at this IP; repeat for multiple lights",
     )
     parser.add_argument(
+        "--esphome", metavar="IP", action="append", dest="esphome_ips",
+        help="Drive an ESPHome light over the native API at this IP; repeat for multiple lights",
+    )
+    parser.add_argument(
+        "--esphome-key", metavar="KEY",
+        help="ESPHome API encryption key (noise PSK); defaults to $ESPHOME_KEY",
+    )
+    parser.add_argument(
+        "--esphome-password", metavar="PASSWORD",
+        help="ESPHome legacy API password; defaults to $ESPHOME_PASSWORD",
+    )
+    parser.add_argument(
         "--tasmota-no-sleep", action="store_true",
         help="Set Sleep 0 on each Tasmota light (halves command latency, more idle power, persisted to flash)",
     )
@@ -133,11 +145,17 @@ def main():
     devices = []
     if args.ips:
         devices += device_manager.connect_to_ips(args.ips)
-    elif not args.tasmota_ips:
+    elif not (args.tasmota_ips or args.esphome_ips):
         devices += device_manager.discover_devices()
     if args.tasmota_ips:
         devices += device_manager.connect_to_tasmota(
             args.tasmota_ips, disable_wifi_sleep=args.tasmota_no_sleep
+        )
+    if args.esphome_ips:
+        devices += device_manager.connect_to_esphome(
+            args.esphome_ips,
+            noise_psk=args.esphome_key or os.getenv("ESPHOME_KEY"),
+            password=args.esphome_password or os.getenv("ESPHOME_PASSWORD"),
         )
 
     events_queue = asyncio.Queue()

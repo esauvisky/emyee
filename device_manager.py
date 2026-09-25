@@ -1,10 +1,12 @@
 # device_manager.py
 from typing import List, Optional
+import asyncio
 import socket
 from yeelight import discover_bulbs, Bulb
 from loguru import logger
 from light_device import LightDevice
 from tasmota_device import TasmotaDevice
+from esphome_device import ESPHomeDevice
 from lan_reset import reset_device
 
 def get_real_local_ip_for(target_ip: str) -> str:
@@ -113,4 +115,21 @@ class DeviceManager:
                 logger.error(f"Failed to initialize bulb at {ip}:{port}: {e}")
 
         logger.info(f"Found and initialized {len(devices)} LightDevice(s).")
+        return devices
+
+    def connect_to_esphome(
+        self, ips: List[str], noise_psk: Optional[str] = None, password: Optional[str] = None
+    ) -> List[ESPHomeDevice]:
+        logger.info("Connecting to {} ESPHome light(s): {}", len(ips), ips)
+        # The aioesphomeapi connection is bound to the loop it is opened on, so
+        # it has to be the same default loop main.py later runs the workers on.
+        loop = asyncio.get_event_loop()
+        devices: List[ESPHomeDevice] = []
+        for ip in ips:
+            device = ESPHomeDevice(ip, noise_psk=noise_psk, password=password)
+            try:
+                devices.append(loop.run_until_complete(device.connect()))
+            except Exception as e:
+                logger.error(f"Failed to initialize ESPHome light at {ip}: {e}")
+        logger.info(f"Connected to {len(devices)} ESPHome light(s).")
         return devices
