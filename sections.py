@@ -4,13 +4,21 @@ import numpy as np
 
 
 def detect_sections(analysis: dict, bars: list[dict], phrase_bars: int = 4) -> list[dict]:
+    """Split the track where loudness or timbre shifts between the
+    ``phrase_bars`` before and after a bar.
+
+    Every bar is a candidate, so boundaries land on the bar the music actually
+    changes on rather than on a fixed phrase grid. A boundary must clear the
+    track's 75th-percentile score and beat both neighbouring bars, so sections
+    are at least two bars long.
+    """
     segments = analysis.get("segments", [])
     duration = analysis.get("track", {}).get("duration", 0.0)
     if len(bars) < phrase_bars * 2 or not segments:
         return [{"start": 0.0, "duration": duration, "confidence": 1.0, "loudness": -20.0}]
 
     candidates = []
-    for bar_index in range(phrase_bars, len(bars), phrase_bars):
+    for bar_index in range(phrase_bars, len(bars)):
         start = bars[bar_index]["start"]
         left_start = bars[bar_index - phrase_bars]["start"]
         right_end = bars[min(len(bars) - 1, bar_index + phrase_bars)]["start"]
@@ -31,7 +39,7 @@ def detect_sections(analysis: dict, bars: list[dict], phrase_bars: int = 4) -> l
     if not candidates:
         return [{"start": 0.0, "duration": duration, "confidence": 1.0, "loudness": -20.0}]
 
-    threshold = max(0.12, float(np.median([score for _, score in candidates])))
+    threshold = max(0.12, float(np.percentile([score for _, score in candidates], 75)))
     boundaries = [0.0] + [
         bars[index]["start"] for position, (index, score) in enumerate(candidates)
         if score >= threshold

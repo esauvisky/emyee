@@ -14,6 +14,8 @@ API_CURRENT_PLAYING = 'https://api.spotify.com/v1/me/player/currently-playing'
 API_AUDIO_ANALYSIS = 'https://api.spotify.com/v1/audio-analysis/'
 SPOTIFY_CHANGES_LISTENER_DELAY = 0.02
 SPOTIFY_CHANGES_LISTENER_FAILURE_DELAY = 1
+# Progress off from the running clock by more than this is a seek, not drift.
+SEEK_THRESHOLD = 1.5
 SPOTIFY_REDIRECT_URI = os.getenv("SPOTIFY_REDIRECT_URI")
 if not SPOTIFY_REDIRECT_URI:
     SPOTIFY_REDIRECT_HOST = os.getenv("SPOTIFY_REDIRECT_HOST", "127.0.0.1")
@@ -33,24 +35,32 @@ COLORS = [(255, 102, 129), (204, 0, 203), (232, 62, 62), (102, 0, 102), (0, 0, 2
 
 # Define a vibrant color palette (Hue, Saturation)
 VIBRANT_COLOR_PALETTE = [
-    (0, 80),    # Red
-    (30, 80),   # Orange
+    (0, 90),    # Red
+    (15, 60),   # Coral
+    (30, 95),   # Orange
+    (45, 85),   # Amber
     (60, 80),   # Yellow
-    (120, 80),  # Green
-    (180, 80),  # Cyan
-    (220, 80),  # Blue
-    (300, 80),  # Magenta
+    (90, 85),   # Lime
+    (120, 90),  # Green
+    (160, 70),  # Mint
+    (180, 90),  # Cyan
+    (195, 55),  # Sky
+    (220, 95),  # Blue
+    (250, 80),  # Indigo
+    (275, 85),  # Violet
+    (300, 90),  # Magenta
+    (320, 50),  # Pink
+    (340, 80),  # Rose
 ]
 
 
 
 def get_vibrant_color(current_hue):
-    palette = VIBRANT_COLOR_PALETTE.copy()
-    palette = [color for color in palette if abs(color[0] - current_hue) >= 30]
-    if not palette:
-        palette = VIBRANT_COLOR_PALETTE  # Reset if no colors are sufficiently different
-    new_color = random.choice(palette)
-    return new_color
+    palette = [
+        color for color in VIBRANT_COLOR_PALETTE
+        if abs((color[0] - current_hue + 180) % 360 - 180) >= 40
+    ]
+    return random.choice(palette)
 
 
 def setup_logging(log_lvl="DEBUG", options={}, sink=None):

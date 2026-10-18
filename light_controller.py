@@ -10,6 +10,7 @@ from utils import (
     get_next_item,
     CONTROLLER_TICK,
     MIN_ANALYSIS_CONFIDENCE,
+    SEEK_THRESHOLD,
     get_vibrant_color,
     merge_short_segments,
     min_segment_duration_from_future_measures,
@@ -17,9 +18,20 @@ from utils import (
 import random
 import numpy as np
 
-from atmospheric import profile_for, pulses_for
+from atmospheric import VISIBLE_MIN, band_for, profile_for, pulses_for, to_brightness
 from light_device import BaseLightDevice
 from sections import detect_sections
+
+# A bar this many dB under the median of the QUIET_LOOKBACK_BARS before it
+# is a breakdown: held at its resting level instead of pulsing.
+QUIET_BAR_DB = 5.0
+QUIET_LOOKBACK_BARS = 8
+# Sections at least this energetic (and STROBE_MIN_BARS long) strobe colour
+# every eighth note on their loudest bar, brightness held at their peak.
+STROBE_MIN_ENERGY = 0.75
+STROBE_MIN_BARS = 4
+# Bars over which the hue fades in, ending on the section's first beat.
+HUE_FADE_BARS = 1
 
 class LightsController:
     def __init__(self, devices: List[BaseLightDevice], events_queue: asyncio.Queue):
@@ -38,6 +50,8 @@ class LightsController:
         self.current_section_index = -1
         self.analysis = None
         self.current_progress = 0
+        self._last_progress: float = 0.0          # song time of the previous progress tick
+        self._last_progress_mono: float = time.monotonic()
         self.section_color_indexes = set()
         self.min_segment_duration = 0.1
         self.beats_per_measure = 4
@@ -46,6 +60,11 @@ class LightsController:
         self._loudness_max = 1.0
         self._segment_starts: list = []
         self._section_energies: list = []
+        self._quiet_bars: set[int] = set()
+        self._bar_loudness: list[float] = []
+        self._strobe_bars: set[int] = set()
+        self._strobe_task: Optional[asyncio.Task] = None
+        self._strobe_scheduled_for: int = -1     # bar index of the scheduled strobe
         self._section_timbres: list = []
         self._beat_starts: list = []
         self.current_song: str = ""
@@ -54,10 +73,12 @@ class LightsController:
         self._fade_out_start: float = float('inf')
         self._track_duration: float = 0.0
         self._section_bar_starts: list = []
+        self._section_first_beat: list = []
         self._last_segment_idx = -1
         self._beat_task: Optional[asyncio.Task] = None
+        self._fade_task: Optional[asyncio.Task] = None
+        self._fade_window: tuple[float, float] | None = None   # song-time span owned by a hue fade
         self._beat_scheduled_for: int = -1
-        self._section_color_task: Optional[asyncio.Task] = None
         self._pre_section_trans_for: int = -1   # section index we've pre-transitioned for
 
         # Tunable — override from main.py after construction
@@ -79,6 +100,7 @@ class LightsController:
         self._color_trans_start_sat: float = float(self.current_saturation)
         self._color_trans_start_time: float = 0.0
         self._color_trans_duration: float = 0.0
+        self._sent_color: tuple[int, int] | None = None   # last hue/sat sent to the devices
         self._last_timing_log_second = -1
 
         self._current_params = {
@@ -114,7 +136,8 @@ class LightsController:
             elif isinstance(event, EventStop):
                 logger.warning("Song stopped!")
                 self._cancel_beat_task()
-                self._cancel_section_color_task()
+                self._cancel_fade_task()
+                self._cancel_strobe_task()
                 self.analysis = None
             self.events_queue.task_done()
             await asyncio.sleep(CONTROLLER_TICK)
@@ -146,8 +169,15 @@ class LightsController:
             key=lambda x: x['start'],
         )
         self._beat_starts = [b['start'] for b in self.beats]
+        # Pulse cycles restart on each section's first beat, so every section
+        # needs its first beat index and how many beats it spans.
+        self._section_first_beat = [
+            bisect.bisect_left(self._beat_starts, start) for start in self._section_bar_starts
+        ]
         self._cancel_beat_task()
-        self._cancel_section_color_task()
+        self._cancel_fade_task()
+        self._cancel_strobe_task()
+        self._strobe_scheduled_for = -1
         self._beat_scheduled_for = -1
         self._tatum_starts = [t['start'] for t in self.analysis.get('tatums', []) if t.get('confidence', 1.0) >= conf]
         self.current_song = event.song_name
@@ -171,6 +201,8 @@ class LightsController:
 
         self._compute_section_energies()
         self._compute_section_timbres()
+        self._compute_quiet_bars()
+        self._compute_strobe_bars()
 
         self.min_segment_duration, self.beats_per_measure, self.avg_measure_duration = \
             min_segment_duration_from_future_measures(self.beats, self.bars, event.progress_time_ms)
@@ -190,21 +222,80 @@ class LightsController:
         self.section_color_indexes = self._build_section_color_indexes(len(self.sections))
         self._color_trans_duration = 0.0
         self._pre_section_trans_for = -1
+        self._fade_window = None
+        self._last_progress = event.progress_time_ms
+        self._last_progress_mono = time.monotonic()
 
     def _compute_section_energies(self):
+        """Per-section activity (0–1): loudness rank blended with onset-density rank.
+
+        Loud but sustained passages and busy but quiet ones both land mid-range;
+        only sections that are loud *and* busy reach the full brightness swing.
+        """
         if not self.sections:
             self._section_energies = []
             return
-        loudnesses = np.array([section.get('loudness', -20.0) for section in self.sections])
-        order = np.argsort(loudnesses)
-        scores = np.empty(len(order), dtype=float)
-        for rank, index in enumerate(order):
-            scores[index] = rank / max(len(order) - 1, 1)
-        self._section_energies = scores.tolist()
+        segment_starts = [s.get('start', 0.0) for s in self.analysis.get('segments', [])]
+        densities = []
+        for section in self.sections:
+            start = section.get('start', 0.0)
+            end = start + section.get('duration', 0.0)
+            count = bisect.bisect_left(segment_starts, end) - bisect.bisect_left(segment_starts, start)
+            densities.append(count / max(section.get('duration', 0.0), 1e-6))
+
+        def ranks(values):
+            order = np.argsort(values, kind='stable')
+            scores = np.empty(len(order), dtype=float)
+            for rank, index in enumerate(order):
+                scores[index] = rank / max(len(order) - 1, 1)
+            return scores
+
+        loudnesses = [section.get('loudness', -20.0) for section in self.sections]
+        self._section_energies = (0.6 * ranks(loudnesses) + 0.4 * ranks(densities)).tolist()
         logger.debug(
             "Section energies: {}",
             ' '.join(f"{i}:{energy:.2f}" for i, energy in enumerate(self._section_energies))
         )
+
+    def _compute_quiet_bars(self):
+        """Bars far quieter than the bars leading into them (breakdowns, gaps).
+
+        Measured against the preceding bars rather than the section, so a
+        breakdown that forms its own section still counts.
+        """
+        segments = self.analysis.get('segments', [])
+        segment_starts = [s.get('start', 0.0) for s in segments]
+        self._bar_loudness = []
+        for bar in self.bars:
+            start = bar['start']
+            end = start + bar.get('duration', 0.0)
+            in_bar = segments[bisect.bisect_left(segment_starts, start):bisect.bisect_left(segment_starts, end)]
+            # A bar with no segments is silence.
+            self._bar_loudness.append(
+                float(np.mean([s.get('loudness_max', -20.0) for s in in_bar])) if in_bar else -60.0
+            )
+        self._quiet_bars = {
+            index for index in range(1, len(self.bars))
+            if self._bar_loudness[index] < float(np.median(
+                self._bar_loudness[max(0, index - QUIET_LOOKBACK_BARS):index]
+            )) - QUIET_BAR_DB
+        }
+        logger.debug("Quiet bars: {}", ' '.join(str(index) for index in sorted(self._quiet_bars)))
+
+    def _compute_strobe_bars(self):
+        """The loudest bar of each energetic section, never its last bar (that
+        one belongs to the hue fade) nor a quiet bar."""
+        bar_starts = [bar['start'] for bar in self.bars]
+        section_bars = [bisect.bisect_left(bar_starts, start) for start in self._section_bar_starts] + [len(self.bars)]
+        self._strobe_bars = set()
+        for index, energy in enumerate(self._section_energies):
+            first, end = section_bars[index], section_bars[index + 1]
+            if energy < STROBE_MIN_ENERGY or end - first < STROBE_MIN_BARS:
+                continue
+            candidates = [bar for bar in range(first, end - 1) if bar not in self._quiet_bars]
+            if candidates:
+                self._strobe_bars.add(max(candidates, key=lambda bar: self._bar_loudness[bar]))
+        logger.debug("Strobe bars: {}", ' '.join(str(bar) for bar in sorted(self._strobe_bars)))
 
     def _compute_section_timbres(self):
         """Average segment timbre vectors per section for structural boundary detection."""
@@ -234,14 +325,12 @@ class LightsController:
         self._segment_starts = [s['start'] for s in self.segments]
         self._last_segment_idx = -1
 
-    def map_brightness(self, segment, section_energy_score: float = 0.5) -> float:
+    def _segment_loudness(self, segment) -> float:
+        """Segment loudness normalised to the track's range (0–1)."""
         loudness = 10 ** (segment["loudness_start"] / 20)
         span = self._loudness_max - self._loudness_min
         raw = 0.5 if span == 0 else (loudness - self._loudness_min) / span
-        raw = max(0.0, min(1.0, raw))
-        floor = 5 + section_energy_score * 25
-        ceiling = 55 + section_energy_score * 45
-        return max(0.0, min(100.0, floor * (ceiling / floor) ** raw))
+        return max(0.0, min(1.0, raw))
 
     def _fade_multiplier(self, current_time: float) -> float:
         if self._fade_in_end > 0 and current_time < self._fade_in_end:
@@ -274,6 +363,13 @@ class LightsController:
         return get_vibrant_color(self._current_params['hue'])
 
     async def handle_adjust_progress(self, current_time: float):
+        now = time.monotonic()
+        expected = self._last_progress + (now - self._last_progress_mono)
+        if abs(current_time - expected) > SEEK_THRESHOLD:
+            self._reset_for_seek(expected, current_time)
+        self._last_progress = current_time
+        self._last_progress_mono = now
+
         next_bar = get_next_item(self.bars, current_time)
         if not self._segment_starts:
             logger.debug("skipping adjust progress")
@@ -298,8 +394,6 @@ class LightsController:
             )
             self._last_timing_log_second = timing_second
 
-        tasks = []
-
         section = self.sections[current_section_index]
         section_changed = self.current_section_index != current_section_index
         seg_idx = min(
@@ -309,7 +403,9 @@ class LightsController:
         energy_score = self._section_energies[current_section_index]
         fade = self._fade_multiplier(current_time)
 
-        # Low-energy colors drift in early; high-energy colors arrive near the boundary.
+        # The last HUE_FADE_BARS before an important boundary are one HSV
+        # command into the new colour, landing on the section's first beat at
+        # the level the last beat would have rested at.
         next_section_idx = current_section_index + 1
         if (
             next_section_idx < len(self.sections)
@@ -320,33 +416,25 @@ class LightsController:
             next_section = self.sections[next_section_idx]
             next_section_start = self._section_bar_starts[next_section_idx]
             important_boundary = next_section_idx in self.section_color_indexes
-
-            if important_boundary and next_section.get('confidence', 1.0) >= self.min_confidence:
-                idx_at_section = bisect.bisect_left(self._beat_starts, next_section_start)
-                lead_beats = max(2, round((1.0 - self._section_energies[next_section_idx]) * 8))
-                target_beat_idx = max(0, idx_at_section - lead_beats)
-                pre_trans_start = self._beat_starts[target_beat_idx]
-
-                if lead_beats and pre_trans_start <= current_time < next_section_start:
-                    time_remaining = next_section_start - current_time
-                    target_hue, target_sat = self._section_hue_sat(next_section)
-                    self._pre_section_trans_for = next_section_idx
-                    tasks.append(asyncio.create_task(
-                        self.set_parameters(
-                            duration=time_remaining,
-                            change_color=True,
-                            target_hue=target_hue,
-                            target_saturation=target_sat,
-                        )
-                    ))
-                    logger.info(
-                        "Pre-section → hue={} sat={} over {:.2f}s (section {} in {:.2f}s)",
-                        target_hue, target_sat, time_remaining,
-                        next_section_idx, time_remaining,
-                    )
+            bar_starts = [bar['start'] for bar in self.bars]
+            fade_start = max(
+                bar_starts[max(0, bisect.bisect_left(bar_starts, next_section_start) - HUE_FADE_BARS)],
+                self._section_bar_starts[current_section_index],
+            )
+            if (
+                important_boundary
+                and next_section.get('confidence', 1.0) >= self.min_confidence
+                and fade_start <= current_time < next_section_start
+            ):
+                self._schedule_hue_fade(
+                    next_section_idx, current_time,
+                    max(fade_start, current_time), next_section_start,
+                    to_brightness(band_for(energy_score)[0] * fade),
+                )
 
         # Sections are detected at their raw start; color changes are anchored
-        # to the first analyzed bar in that section.
+        # to the first analyzed bar in that section. This only fires when the
+        # fade was not scheduled ahead (e.g. after a seek).
         if section_changed:
             logger.info(
                 "Section change (index {}, energy={:.2f})",
@@ -358,18 +446,11 @@ class LightsController:
                 and section.get('confidence', 1.0) >= self.min_confidence
                 and self._pre_section_trans_for != current_section_index
             ):
-                target_hue, target_saturation = self._section_hue_sat(section)
-                deadline = time.monotonic() + max(
-                    0.0,
-                    self._section_bar_starts[current_section_index] - current_time,
-                )
-                self._pre_section_trans_for = current_section_index
-                self._cancel_section_color_task()
-                self._section_color_task = asyncio.create_task(
-                    self._scheduled_section_color(
-                        deadline, target_hue, target_saturation,
-                        current_section_index,
-                    )
+                start = max(self._section_bar_starts[current_section_index], current_time)
+                self._schedule_hue_fade(
+                    current_section_index, current_time,
+                    start, start + self.avg_measure_duration / max(1, self.beats_per_measure),
+                    to_brightness(band_for(energy_score)[0] * fade),
                 )
 
         # Original atmospheric engine: every analyzed beat gets a short pulse;
@@ -379,25 +460,94 @@ class LightsController:
         if next_beat_idx < len(self.beats) and next_beat_idx != self._beat_scheduled_for:
             next_beat = self.beats[next_beat_idx]
             fire_in = next_beat['start'] - current_time
-            if fire_in < 0.05:
+            in_fade = (
+                self._fade_window is not None
+                and self._fade_window[0] <= next_beat['start'] < self._fade_window[1]
+            )
+            if in_fade:
+                # The hue fade owns the light until it finishes.
+                self._beat_scheduled_for = next_beat_idx
+            elif fire_in < 0.05:
                 # Beat is essentially "now" — skip it; this happens during Spotify catch-up
                 # bursts where song time jumps ahead rapidly and next beats appear stale.
                 self._beat_scheduled_for = next_beat_idx
+            elif self._beat_bar(next_beat_idx) in self._strobe_bars:
+                # The strobe owns its whole bar: one task steps the colour on
+                # every eighth note from this beat to the bar's end.
+                self._beat_scheduled_for = next_beat_idx
+                bar = self._beat_bar(next_beat_idx)
+                if self._strobe_scheduled_for != bar:
+                    self._strobe_scheduled_for = bar
+                    bar_end = self.bars[bar]['start'] + self.bars[bar].get('duration', 0.0)
+                    eighths = []
+                    for beat in self.beats[next_beat_idx:]:
+                        if beat['start'] >= bar_end - 0.01:
+                            break
+                        half = beat.get('duration', 0.5) / 2
+                        eighths += [(beat['start'], half), (beat['start'] + half, half)]
+                    now = time.monotonic()
+                    peak = to_brightness(band_for(energy_score)[1] * fade)
+                    logger.debug(
+                        "Beat {:>3} | strobe bar {}: {} steps at {:.1f}%",
+                        next_beat_idx, bar, len(eighths), self._scale_brightness(peak),
+                    )
+                    self._cancel_strobe_task()
+                    self._strobe_task = asyncio.create_task(self._scheduled_strobe(
+                        [(now + (start - current_time), length) for start, length in eighths], peak,
+                    ))
+            elif self._beat_bar(next_beat_idx) in self._quiet_bars:
+                # Quiet bars hold at the resting level: the first beat of a
+                # quiet run settles there over one beat, the rest stay still.
+                self._beat_scheduled_for = next_beat_idx
+                if next_beat_idx == 0 or self._beat_bar(next_beat_idx - 1) not in self._quiet_bars:
+                    self._cancel_beat_task()
+                    resting = to_brightness(band_for(energy_score)[0] * fade)
+                    logger.debug("Beat {:>3} | quiet, hold at {:.1f}%", next_beat_idx, self._scale_brightness(resting))
+                    self._beat_task = asyncio.create_task(
+                        self._scheduled_hold(time.monotonic() + fire_in, next_beat.get('duration', 0.5), resting)
+                    )
             else:
                 self._cancel_beat_task()
                 self._beat_scheduled_for = next_beat_idx
                 deadline = time.monotonic() + fire_in
-                profile_index, profile = profile_for(energy_score, bar_index)
+                section_first_beat = self._section_first_beat[current_section_index]
+                section_end_beat = (
+                    self._section_first_beat[current_section_index + 1]
+                    if current_section_index + 1 < len(self._section_first_beat)
+                    else len(self.beats)
+                )
+                profile_index, profile = profile_for(energy_score, section_end_beat - section_first_beat)
                 pulses = pulses_for(
                     profile, self.atmospheric_pulse_on, self.atmospheric_pulse_off,
                 )
-                pulse, attack, hold, release = pulses[next_beat_idx % len(pulses)]
-                spike = self.map_brightness(self.segments[seg_idx], energy_score) * fade
-                if next_beat_idx % max(1, self.beats_per_measure) == 0:
-                    spike = min(100.0, spike * profile["downbeat_boost"])
-                low = (1 + energy_score * 5) * fade
-                high = max(low, spike * pulse)
+                pulse, attack, hold, release = pulses[(next_beat_idx - section_first_beat) % len(pulses)]
+                beat_len = next_beat.get('duration', 0.5)
+                # Envelopes are beat fractions tuned around 120 BPM. In a slow
+                # song the snappy profiles leave 30-50ms jumps between very
+                # different levels, which read as flashes once the low end is
+                # visible. Floor the ramps at a share of the beat that grows as
+                # the tempo drops: nothing above ~133 BPM, half a beat at 60.
+                slow = max(0.0, min(1.0, (beat_len - 0.45) / 0.45))
+                attack = max(attack, 0.5 * slow)
+                release = max(release, 0.5 * slow)
+                hold = min(hold, max(0.0, 1.0 - attack - release))
+                # Calm and medium sections ease into every beat and decay all
+                # the way into the next one instead of snapping and idling.
+                # Energetic sections keep their snap, but while a colour is
+                # crossing they also decay into the next beat: each command
+                # carries the colour, so idle gaps would make it step.
                 energy_level = round(energy_score * 4)
+                if energy_level < 3:
+                    attack = max(attack, 0.2)
+                    hold = min(hold, 0.1)
+                if energy_level < 3 or self._color_at(deadline) != self._color_at(deadline + beat_len):
+                    release = max(0.0, 1.0 - attack - hold)
+                # The section's band sets the swing; the pulse places this
+                # beat's peak inside it, pulled down on quieter segments.
+                bottom, top = band_for(energy_score)
+                strength = pulse * (0.5 + 0.5 * self._segment_loudness(self.segments[seg_idx]))
+                low = to_brightness(bottom * fade)
+                high = to_brightness((bottom + (top - bottom) * strength) * fade)
                 energy_color = ("blue", "cyan", "green", "yellow", "red")[energy_level]
                 logger.opt(colors=True).debug(
                     f"<bold>Beat {{beat:>3}}</bold> | <{energy_color}>E{{energy}}</{energy_color}> P{{profile}} | "
@@ -410,7 +560,7 @@ class LightsController:
                 )
                 self._beat_task = asyncio.create_task(
                     self._scheduled_beat_pulse(
-                        deadline, high, low, next_beat.get('duration', 0.5),
+                        deadline, high, low, beat_len,
                         (attack, hold, release),
                     )
                 )
@@ -428,9 +578,6 @@ class LightsController:
                 f"at t={current_time:.2f}s"
             )
             self.last_next_bar = next_bar
-
-        if tasks:
-            await asyncio.gather(*tasks)
 
     async def _scheduled_beat_pulse(
         self,
@@ -451,26 +598,92 @@ class LightsController:
             deadline=base_deadline,
         )
 
-    async def _scheduled_section_color(
+    async def _scheduled_strobe(self, steps: list[tuple[float, float]], peak: float):
+        for deadline, length in steps:
+            await asyncio.sleep(max(0.0, deadline - self._device_latency() - time.monotonic()))
+            hue, saturation = get_vibrant_color(self._current_params['hue'])
+            await self.set_parameters(
+                length * 0.25,
+                brightness=peak,
+                change_color=True,
+                target_hue=hue,
+                target_saturation=saturation,
+                deadline=deadline,
+            )
+
+    async def _scheduled_hold(self, deadline: float, duration: float, resting: float):
+        await asyncio.sleep(max(0.0, deadline - self._device_latency() - time.monotonic()))
+        await self.set_parameters(duration, brightness=resting, deadline=deadline)
+
+    def _beat_bar(self, beat_idx: int) -> int:
+        return max(0, bisect.bisect_right([b['start'] for b in self.bars], self._beat_starts[beat_idx]) - 1)
+
+    def _schedule_hue_fade(
+        self,
+        section_idx: int,
+        current_time: float,
+        start: float,
+        end: float,
+        brightness: float,
+    ):
+        """One HSV command over song time start→end into the section's colour.
+        Beats are suppressed for its span so nothing interrupts it."""
+        hue, saturation = self._section_hue_sat(self.sections[section_idx])
+        self._pre_section_trans_for = section_idx
+        self._fade_window = (start, end)
+        if self._beat_scheduled_for >= 0 and self._beat_starts[self._beat_scheduled_for] >= start:
+            # The pending pulse would land inside the fade.
+            self._cancel_beat_task()
+        self._cancel_fade_task()
+        self._fade_task = asyncio.create_task(
+            self._scheduled_hue_fade(
+                time.monotonic() + (start - current_time), end - start, brightness, hue, saturation,
+            )
+        )
+        logger.info(
+            "Hue fade → hue={} sat={} bri={:.1f} over {:.2f}s into section {} (starts in {:.2f}s)",
+            hue, saturation, self._scale_brightness(brightness), end - start,
+            section_idx, start - current_time,
+        )
+
+    async def _scheduled_hue_fade(
         self,
         deadline: float,
+        duration: float,
+        brightness: float,
         hue: int,
         saturation: int,
-        section_idx: int,
     ):
         await asyncio.sleep(max(0.0, deadline - self._device_latency() - time.monotonic()))
-        beat_duration = self.avg_measure_duration / max(1, self.beats_per_measure)
         await self.set_parameters(
-            beat_duration,
+            duration,
+            brightness=brightness,
             change_color=True,
             target_hue=hue,
             target_saturation=saturation,
             deadline=deadline,
         )
-        logger.info(
-            "Section recolor (index {}, energy={:.2f})",
-            section_idx, self._section_energies[section_idx],
-        )
+
+    def _reset_for_seek(self, expected: float, current_time: float):
+        """Drop everything scheduled against the old position.
+
+        Pending beats and hue fades carry monotonic deadlines computed
+        from the old song time. The colour freezes where its crossing had got
+        to, and the section is re-entered from scratch so it recolours.
+        """
+        logger.info("Seek detected {:.2f}s → {:.2f}s; rescheduling", expected, current_time)
+        self._cancel_beat_task()
+        self._cancel_fade_task()
+        self._cancel_strobe_task()
+        self._strobe_scheduled_for = -1
+        self._fade_window = None
+        self._beat_scheduled_for = -1
+        self._pre_section_trans_for = -1
+        self.current_section_index = -1
+        hue, saturation = self._color_at(time.monotonic())
+        self._current_params['hue'] = hue
+        self._current_params['saturation'] = saturation
+        self._color_trans_duration = 0.0
 
     def _section_index_for_time(self, current_time: float) -> int | None:
         if not self.sections:
@@ -495,10 +708,15 @@ class LightsController:
             self._beat_task.cancel()
         self._beat_task = None
 
-    def _cancel_section_color_task(self):
-        if self._section_color_task and not self._section_color_task.done():
-            self._section_color_task.cancel()
-        self._section_color_task = None
+    def _cancel_strobe_task(self):
+        if self._strobe_task and not self._strobe_task.done():
+            self._strobe_task.cancel()
+        self._strobe_task = None
+
+    def _cancel_fade_task(self):
+        if self._fade_task and not self._fade_task.done():
+            self._fade_task.cancel()
+        self._fade_task = None
 
     async def set_parameters(
         self,
@@ -521,14 +739,6 @@ class LightsController:
             new_saturation = self._current_params['saturation']
 
         if brightness is not None:
-            # A brightness-only command resolves its unset colour fields from the
-            # bulb's in-flight target, which cuts a long colour transition short
-            # and snaps the new hue in early. Drop beat pulses that would land
-            # before the colour has finished crossing.
-            if not change_color and self._color_trans_duration > 0:
-                lands_at = deadline if deadline is not None else time.monotonic()
-                if lands_at < self._color_trans_start_time + self._color_trans_duration:
-                    return
             new_brightness = self._scale_brightness(brightness)
         else:
             new_brightness = self._current_params['brightness']
@@ -543,34 +753,25 @@ class LightsController:
             return
 
         now = time.monotonic()
+        starts_at = deadline if deadline is not None else now
 
         if change_color:
-            # Record current interpolated color position as the start of the new transition
-            if self._color_trans_duration > 0:
-                t = min(1.0, (now - self._color_trans_start_time) / self._color_trans_duration)
-                diff = ((self._current_params['hue'] - self._color_trans_start_hue) + 180) % 360 - 180
-                self._color_trans_start_hue = (self._color_trans_start_hue + diff * t) % 360
-                diff_sat = self._current_params['saturation'] - self._color_trans_start_sat
-                self._color_trans_start_sat = self._color_trans_start_sat + diff_sat * t
-            else:
-                self._color_trans_start_hue = float(self._current_params['hue'])
-                self._color_trans_start_sat = float(self._current_params['saturation'])
-            self._color_trans_start_time = now
+            # Restart the crossing from wherever the colour has got to.
+            start_hue, start_sat = self._color_at(starts_at)
+            self._color_trans_start_hue = float(start_hue)
+            self._color_trans_start_sat = float(start_sat)
+            self._color_trans_start_time = starts_at
             self._color_trans_duration = duration
-            cmd_hue = new_hue
-            cmd_sat = new_saturation
-        else:
-            # Lerp hue/sat to the current transition position for the panel while
-            # brightness-only beat commands leave the bulb's color untouched.
-            if self._color_trans_duration > 0:
-                t = min(1.0, (now - self._color_trans_start_time) / self._color_trans_duration)
-                diff = ((self._current_params['hue'] - self._color_trans_start_hue) + 180) % 360 - 180
-                cmd_hue = int((self._color_trans_start_hue + diff * t) % 360)
-                diff_sat = self._current_params['saturation'] - self._color_trans_start_sat
-                cmd_sat = int(self._color_trans_start_sat + diff_sat * t)
-            else:
-                cmd_hue = self._current_params['hue']
-                cmd_sat = self._current_params['saturation']
+            self._current_params['hue'] = new_hue
+            self._current_params['saturation'] = new_saturation
+
+        # A brightness-only command resolves its unset colour fields from the
+        # bulb's in-flight target, which would cut a colour crossing short and
+        # snap the new hue in. Every command lands on the crossing's position
+        # at its landing time, and goes out as HSV whenever that differs from
+        # what the bulb was last told.
+        cmd_hue, cmd_sat = self._color_at(starts_at + duration)
+        send_color = change_color or (cmd_hue, cmd_sat) != self._sent_color
 
         # Capture current interpolated position as the start of the panel animation
         ph, ps, pb = self._panel_interp()
@@ -580,9 +781,6 @@ class LightsController:
         self._trans_start_time = now
         self._trans_duration = duration
 
-        if change_color:
-            self._current_params['hue'] = new_hue
-            self._current_params['saturation'] = new_saturation
         if brightness is not None:
             self._current_params['brightness'] = new_brightness
 
@@ -592,7 +790,8 @@ class LightsController:
 
         if wait_before_ms:
             await asyncio.sleep(wait_before_ms / 1000)
-        if change_color:
+        if send_color:
+            self._sent_color = (cmd_hue, cmd_sat)
             await asyncio.gather(*(
                 device.set_hsv(
                     cmd_hue, cmd_sat, new_brightness, duration=duration,
@@ -610,5 +809,22 @@ class LightsController:
             ))
         await asyncio.sleep(0)
 
+    def _color_at(self, at: float) -> tuple[int, int]:
+        """Hue and saturation the colour crossing has reached at monotonic time `at`."""
+        hue = self._current_params['hue']
+        saturation = self._current_params['saturation']
+        if self._color_trans_duration <= 0:
+            return hue, saturation
+        t = max(0.0, min(1.0, (at - self._color_trans_start_time) / self._color_trans_duration))
+        diff = ((hue - self._color_trans_start_hue) + 180) % 360 - 180
+        return (
+            round(self._color_trans_start_hue + diff * t) % 360,
+            round(self._color_trans_start_sat + (saturation - self._color_trans_start_sat) * t),
+        )
+
     def _scale_brightness(self, brightness: float) -> float:
-        return max(0.0, min(100.0, brightness * self.max_brightness / 100))
+        scaled = max(0.0, min(100.0, brightness * self.max_brightness / 100))
+        # A lowered ceiling must not push visible levels into the off range.
+        if brightness >= VISIBLE_MIN:
+            scaled = max(scaled, VISIBLE_MIN)
+        return scaled

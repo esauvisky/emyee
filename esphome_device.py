@@ -15,12 +15,12 @@ DEFAULT_PORT = 6053
 # the Yeelight non-music limit and tighter than Tasmota's HTTP round-trip.
 MIN_COMMAND_INTERVAL = 0.02
 CONNECT_TIMEOUT = 20.0
-# ESPHome applies gamma_correct (2.8 by default on the Athom firmware), so the
-# bottom of the range is perceptually crushed: 0% is properly off and 1% is
-# indistinguishable from it. The controller's 0-100 is remapped onto
-# [MIN_VISIBLE_BRIGHTNESS, 100] rather than clamped, so the 1-6% pulse troughs
-# stay distinguishable from each other instead of all collapsing onto the floor.
-MIN_VISIBLE_BRIGHTNESS = 12.0
+# ESPHome interpolates brightness linearly and only then applies gamma_correct
+# (2.8 by default on the Athom firmware), so the bottom of the range is crushed:
+# 12% sent is ~0.3% light, and any ramp out of a trough looks back-loaded no
+# matter how long it is. Pre-compensate with a power law so the net curve is a
+# mild 2.8/OUTPUT_GAMMA ≈ 1.27: 1% → 12%, 10% → 35%, 50% → 73%, 0 stays off.
+OUTPUT_GAMMA = 2.2
 
 
 class ESPHomeDevice(BaseLightDevice):
@@ -101,7 +101,7 @@ class ESPHomeDevice(BaseLightDevice):
 
     def _visible(self, brightness: float) -> float:
         b = max(0.0, min(100.0, brightness))
-        return MIN_VISIBLE_BRIGHTNESS + b / 100 * (100.0 - MIN_VISIBLE_BRIGHTNESS)
+        return 100.0 * (b / 100) ** (1 / OUTPUT_GAMMA)
 
     async def _apply(self, desired: DesiredState):
         # light_command is fire-and-forget (no ack), so there is no round trip

@@ -27,3 +27,4 @@ __pycache__/
 .cache
 *tokens.json
 analysis.json
+recordings/
