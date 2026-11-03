@@ -2,13 +2,17 @@
 """Record human brightness and colour cues against the Spotify track playing.
 
   space  brightness pulse here
-  enter  colour change here
+  enter  hold for a colour transition: press = it starts, release = it ends
   q      quit
 
 Each track take goes to recordings/<unix time>_<track id>.jsonl: a header line
-with the track metadata and the full audio analysis, then one line per tap
-with its song-progress time in seconds. Taps also drive the lights so you see
-what you are producing.
+with the track metadata and the full audio analysis, then one line per cue
+with its song-progress time in seconds. Colour cues carry both the press time
+(`t`) and the release time (`t_end`); a plain tap is an instant change
+(`t_end == t`). Cues also drive the lights so you see what you are producing.
+
+A tty never reports key releases, so the hold is read off keyboard auto-repeat:
+the first Enter opens it and it closes once the repeat stream stops.
 
 Examples:
   python3 recorder.py --esphome 192.168.1.50
@@ -37,8 +41,12 @@ FLASH_PEAK = 100
 FLASH_FLOOR = 15
 FLASH_ATTACK = 0.04
 FLASH_RELEASE = 0.35
-COLOR_FADE = 0.6
-KEYS = {" ": "brightness", "\n": "color"}
+HOLD_FADE = 3.0           # fade pace while Enter is held; the release snaps it to the target
+RELEASE_FADE = 0.15
+# Auto-repeat timing: the first repeat follows the press after the OS initial
+# delay (250–660ms depending on console/X/Wayland), later ones every 25–40ms.
+HOLD_FIRST_GAP = 1.0
+HOLD_REPEAT_GAP = 0.2
 
 
 class Recorder:
@@ -51,6 +59,12 @@ class Recorder:
         self.counts = {"brightness": 0, "color": 0}
         self.hue, self.saturation = get_vibrant_color(0)
         self._flash_task: asyncio.Task | None = None
+        self.hold_start: float | None = None   # song time of the Enter press
+        self.hold_end = 0.0                     # song time of the latest Enter repeat
+        self.hold_wall = 0.0
+        self.hold_last_mono = 0.0
+        self.hold_repeats = 0
+        self._hold_task: asyncio.Task | None = None
 
     def song_time(self) -> float:
         return self.progress + time.monotonic() - self.progress_mono
@@ -77,6 +91,10 @@ class Recorder:
 
     def close_take(self):
         if self.take is not None:
+            if self.hold_start is not None:
+                self._hold_task.cancel()
+                self._write_hold()
+                self.hold_start = None
             self.take.close()
             self.take = None
             self.song = ""
@@ -85,21 +103,54 @@ class Recorder:
         self.take.write(json.dumps(record) + "\n")
         self.take.flush()
 
-    async def tap(self, kind: str):
-        # Taps outside a take (nothing playing) still drive the lights, they
+    async def brightness_tap(self):
+        # Cues outside a take (nothing playing) still drive the lights, they
         # just have no song timeline to land on.
         if self.take is not None:
-            self._write({"type": kind, "t": round(self.song_time(), 4), "wall": time.time()})
-            self.counts[kind] += 1
-        if kind == "brightness":
-            if self._flash_task is not None and not self._flash_task.done():
-                self._flash_task.cancel()
-            self._flash_task = asyncio.create_task(self._flash())
-        else:
-            self.hue, self.saturation = get_vibrant_color(self.hue)
-            await asyncio.gather(*(
-                d.set_hsv(self.hue, self.saturation, FLASH_FLOOR, duration=COLOR_FADE) for d in self.devices
-            ))
+            self._write({"type": "brightness", "t": round(self.song_time(), 4), "wall": time.time()})
+            self.counts["brightness"] += 1
+        if self._flash_task is not None and not self._flash_task.done():
+            self._flash_task.cancel()
+        self._flash_task = asyncio.create_task(self._flash())
+
+    async def color_press(self):
+        """One Enter character: either the press that opens a hold or an auto-repeat inside it."""
+        self.hold_last_mono = time.monotonic()
+        self.hold_end = self.song_time()
+        if self.hold_start is not None:
+            self.hold_repeats += 1
+            return
+        self.hold_start = self.hold_end
+        self.hold_wall = time.time()
+        self.hold_repeats = 0
+        self._hold_task = asyncio.create_task(self._hold_watch())
+        self.hue, self.saturation = get_vibrant_color(self.hue)
+        await asyncio.gather(*(
+            d.set_hsv(self.hue, self.saturation, FLASH_FLOOR, duration=HOLD_FADE) for d in self.devices
+        ))
+
+    async def _hold_watch(self):
+        while True:
+            gap = HOLD_REPEAT_GAP if self.hold_repeats else HOLD_FIRST_GAP
+            remaining = self.hold_last_mono + gap - time.monotonic()
+            if remaining <= 0:
+                break
+            await asyncio.sleep(remaining)
+        if self.take is not None:
+            self._write_hold()
+        self.hold_start = None
+        await asyncio.gather(*(
+            d.set_hsv(self.hue, self.saturation, FLASH_FLOOR, duration=RELEASE_FADE) for d in self.devices
+        ))
+
+    def _write_hold(self):
+        self._write({
+            "type": "color",
+            "t": round(self.hold_start, 4),
+            "t_end": round(self.hold_end, 4),
+            "wall": self.hold_wall,
+        })
+        self.counts["color"] += 1
 
     async def _flash(self):
         await asyncio.gather(*(d.set_brightness(FLASH_PEAK, duration=FLASH_ATTACK) for d in self.devices))
@@ -108,13 +159,15 @@ class Recorder:
 
     def draw(self):
         if self.take is None:
-            line = "  waiting for a track…  [space] brightness  [enter] colour  [q] quit"
+            line = "  waiting for a track…  [space] brightness  [hold enter] colour transition  [q] quit"
         else:
             t = self.song_time()
             line = (
                 f"  ● REC  {self.song}  {int(t // 60)}:{t % 60:05.2f}  "
                 f"bri:{self.counts['brightness']}  col:{self.counts['color']}"
             )
+            if self.hold_start is not None:
+                line += f"  ▶ colour {t - self.hold_start:.2f}s"
         sys.stderr.write("\r\033[2K" + line)
         sys.stderr.flush()
 
@@ -183,8 +236,10 @@ async def main(args):
             ch = await keys.get()
             if ch == "q":
                 break
-            if ch in KEYS:
-                await recorder.tap(KEYS[ch])
+            if ch == " ":
+                await recorder.brightness_tap()
+            elif ch == "\n":
+                await recorder.color_press()
     finally:
         loop.remove_reader(sys.stdin.fileno())
         termios.tcsetattr(sys.stdin.fileno(), termios.TCSADRAIN, old_settings)
@@ -196,7 +251,7 @@ async def main(args):
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Record human brightness/colour taps against Spotify playback")
+    parser = argparse.ArgumentParser(description="Record human brightness pulses and colour holds against Spotify playback")
     parser.add_argument("--ip", metavar="IP", action="append", dest="ips", help="Yeelight bulb IP (skip discovery); repeatable")
     parser.add_argument("--tasmota", metavar="IP", action="append", dest="tasmota_ips", help="Tasmota light IP; repeatable")
     parser.add_argument("--esphome", metavar="IP", action="append", dest="esphome_ips", help="ESPHome light IP; repeatable")
