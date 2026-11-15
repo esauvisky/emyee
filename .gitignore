@@ -28,3 +28,4 @@ __pycache__/
 *tokens.json
 analysis.json
 recordings/
+logs/

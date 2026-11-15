@@ -1,6 +1,7 @@
 import asyncio
 import bisect
 import json
+import os
 import time
 from typing import List, Optional
 from dotenv import load_dotenv
@@ -66,6 +67,9 @@ MIN_COMMAND_GAP_S = 0.2
 MAX_HUE_STEP = 90
 # Bars over which the hue crosses in, ending on the section's first beat.
 HUE_FADE_BARS = 1
+# One log file per played track, everything down to TRACE.
+SONG_LOG_DIR = "logs"
+SONG_LOG_FORMAT = "{time:HH:mm:ss.SSS} | {level:1.1} | {message}"
 
 class LightsController:
     def __init__(self, devices: List[BaseLightDevice], events_queue: asyncio.Queue):
@@ -107,6 +111,7 @@ class LightsController:
         self._section_timbres: list = []
         self._beat_starts: list = []
         self.current_song: str = ""
+        self._song_log: int | None = None        # loguru sink id of the current track's file
         self._tatum_starts: list = []
         self._fade_in_end: float = 0.0
         self._fade_out_start: float = float('inf')
@@ -181,6 +186,15 @@ class LightsController:
             await asyncio.sleep(CONTROLLER_TICK)
 
     def handle_song_changed(self, event: EventSongChanged):
+        if self._song_log is not None:
+            logger.remove(self._song_log)
+        os.makedirs(SONG_LOG_DIR, exist_ok=True)
+        log_name = (
+            f"{time.strftime('%Y%m%d-%H%M%S')} {event.artist_names} - {event.song_name} [{event.track_id}].log"
+        ).replace(os.sep, "_")
+        self._song_log = logger.add(
+            os.path.join(SONG_LOG_DIR, log_name), level="TRACE", format=SONG_LOG_FORMAT, colorize=False,
+        )
         self.analysis = event.analysis
         with open("analysis.json", "w") as f:
             json.dump(self.analysis, f, indent=4)
