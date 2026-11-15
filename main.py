@@ -14,10 +14,13 @@ from loguru import logger
 from spotify_listener import SpotifyChangesListener
 from light_controller import LightsController
 from device_manager import DeviceManager
+from light_device import DesiredState
 from utils import setup_logging
 from lan_reset import load_tokens
 
 _PANEL_LINES = 5
+_EXIT_KELVIN = 2500
+_EXIT_BRIGHTNESS = 100
 _terminal_lock = threading.RLock()
 
 
@@ -222,6 +225,8 @@ def main():
             if is_tty:
                 _draw_panel(light_controller, rows)
 
+    final_state = None
+
     try:
         loop.run_until_complete(
             asyncio.gather(
@@ -232,6 +237,7 @@ def main():
         )
     except KeyboardInterrupt:
         logger.info("Stopping...")
+        final_state = DesiredState(mode="ct", kelvin=_EXIT_KELVIN, brightness=_EXIT_BRIGHTNESS, duration=0.3)
     finally:
         if is_tty:
             loop.remove_reader(sys.stdin.fileno())
@@ -239,7 +245,12 @@ def main():
                 termios.tcsetattr(sys.stdin.fileno(), termios.TCSADRAIN, old_settings)
             sys.stderr.write("\033[r\033[J")
             sys.stderr.flush()
-        loop.run_until_complete(asyncio.gather(*(d.stop() for d in devices), return_exceptions=True))
+        results = loop.run_until_complete(
+            asyncio.gather(*(d.stop(final_state) for d in devices), return_exceptions=True)
+        )
+        for device, result in zip(devices, results):
+            if isinstance(result, Exception):
+                logger.error(f"[{device.ip}] stop failed: {result!r}")
 
 
 if __name__ == '__main__':
