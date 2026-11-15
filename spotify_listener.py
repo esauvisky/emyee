@@ -9,7 +9,7 @@ from models import EventSongChanged, EventAdjustProgressTime, EventStop
 from loguru import logger
 
 from utils import API_REQUEST_INTERVAL, API_AUDIO_ANALYSIS, API_CURRENT_PLAYING, SPOTIFY_SCOPE
-from utils import SPOTIFY_CHANGES_LISTENER_DELAY, SPOTIFY_CHANGES_LISTENER_FAILURE_DELAY, SPOTIFY_REDIRECT_URI
+from utils import SPOTIFY_CHANGES_LISTENER_DELAY, SPOTIFY_CHANGES_LISTENER_FAILURE_DELAY, SPOTIFY_REDIRECT_URI, SEEK_THRESHOLD
 
 
 class SpotifyChangesListener:
@@ -108,7 +108,18 @@ class SpotifyChangesListener:
                     predicted_progress = self._progress_anchor_value + (
                         now_mono - self._progress_anchor_mono
                     ) + self._progress_correction
-                    self._progress_correction_target += reported_progress - predicted_progress
+                    if abs(reported_progress - predicted_progress) > SEEK_THRESHOLD:
+                        # A seek: jump straight there. Slewing would sweep the
+                        # controller through every beat and section in between.
+                        logger.info("Seek {:.2f}s → {:.2f}s", predicted_progress, reported_progress)
+                        self._progress_anchor_value = reported_progress
+                        self._progress_anchor_mono = now_mono
+                        self._progress_correction = 0.0
+                        self._progress_correction_target = 0.0
+                        self._progress_last_emit_mono = now_mono
+                        self.last_progress = reported_progress
+                    else:
+                        self._progress_correction_target += reported_progress - predicted_progress
                     self.current_progress = reported_progress
                     item = current_playing.get('item') or {}
 

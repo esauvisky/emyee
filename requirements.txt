@@ -1,3 +1,4 @@
+requests
 spotipy
 aiohttp
 yeelight
@@ -16,3 +17,4 @@ LAPACK
 GCC
 libquadmath==2.1.1
 pandas==2.2.2
+aioesphomeapi

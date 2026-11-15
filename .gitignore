@@ -15,3 +15,17 @@ MANIFEST
 .venv
 .cache-*
 .aider*
+
+# Python
+__pycache__/
+*.py[cod]
+
+# Editor/tool scratch
+.history/
+
+# Generated at runtime — regenerated on every run, and secret besides
+.cache
+*tokens.json
+analysis.json
+recordings/
+logs/

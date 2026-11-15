@@ -14,10 +14,13 @@ from loguru import logger
 from spotify_listener import SpotifyChangesListener
 from light_controller import LightsController
 from device_manager import DeviceManager
+from light_device import DesiredState
 from utils import setup_logging
 from lan_reset import load_tokens
 
 _PANEL_LINES = 5
+_EXIT_KELVIN = 2500
+_EXIT_BRIGHTNESS = 100
 _terminal_lock = threading.RLock()
 
 
@@ -62,16 +65,16 @@ def _draw_panel(controller: LightsController, rows: int) -> None:
 def main():
     parser = argparse.ArgumentParser(description="Spotify-synced Yeelight controller")
     parser.add_argument(
-        "--min-confidence", type=float, default=0.5, metavar="0-1",
-        help="Minimum confidence for beats/bars/segments/tatums (default: 0.5)",
+        "--min-confidence", type=float, default=0.0, metavar="0-1",
+        help="Minimum confidence for beats/bars/segments/tatums (default: 0)",
     )
     parser.add_argument(
         "--sync-offset", type=float, default=0.0, metavar="MS",
         help="Fire light commands this many ms early (+) or late (-) relative to beat/segment (default: 0)",
     )
     parser.add_argument(
-        "--poll-interval", type=float, default=100.0, metavar="MS",
-        help="Progress event interval in ms — lower = more responsive, higher = less CPU (default: 100)",
+        "--poll-interval", type=float, default=20.0, metavar="MS",
+        help="Progress event interval in ms — lower = more responsive, higher = less CPU (default: 20)",
     )
     parser.add_argument(
         "--no-music-mode", action="store_true",
@@ -84,6 +87,30 @@ def main():
     parser.add_argument(
         "--no-lan-reset", action="store_true",
         help="Skip the LAN control off→on cycle before discovery",
+    )
+    parser.add_argument(
+        "--ip", metavar="IP", action="append", dest="ips",
+        help="Connect directly to this bulb IP (skip discovery); repeat for multiple bulbs",
+    )
+    parser.add_argument(
+        "--tasmota", metavar="IP", action="append", dest="tasmota_ips",
+        help="Drive a Tasmota RGB light over HTTP at this IP; repeat for multiple lights",
+    )
+    parser.add_argument(
+        "--esphome", metavar="IP", action="append", dest="esphome_ips",
+        help="Drive an ESPHome light over the native API at this IP; repeat for multiple lights",
+    )
+    parser.add_argument(
+        "--esphome-key", metavar="KEY",
+        help="ESPHome API encryption key (noise PSK); defaults to $ESPHOME_KEY",
+    )
+    parser.add_argument(
+        "--esphome-password", metavar="PASSWORD",
+        help="ESPHome legacy API password; defaults to $ESPHOME_PASSWORD",
+    )
+    parser.add_argument(
+        "--tasmota-no-sleep", action="store_true",
+        help="Set Sleep 0 on each Tasmota light (halves command latency, more idle power, persisted to flash)",
     )
     parser.add_argument(
         "--atmospheric-pulse-on", type=int, metavar="N",
@@ -118,23 +145,21 @@ def main():
             logger.warning(f"tokens file not found at {args.tokens!r} — skipping LAN reset (use --no-lan-reset to suppress)")
 
     device_manager = DeviceManager(enable_music_mode=not args.no_music_mode, tokens=tokens)
-    devices = device_manager.discover_devices()
-
-    if is_tty and devices:
-        sys.stderr.flush()
-        sys.stderr.write("\nDiscovered devices:\n")
-        for i, d in enumerate(devices):
-            sys.stderr.write(f"  [{i + 1}] {d.ip}  ({d.model})\n")
-        sys.stderr.write("Connect to which? (comma-separated numbers, or Enter for all): ")
-        sys.stderr.flush()
-        _raw = sys.stdin.readline().strip()
-        if _raw:
-            try:
-                _idxs = [int(x.strip()) - 1 for x in _raw.split(',')]
-                devices = [devices[i] for i in _idxs if 0 <= i < len(devices)]
-                logger.info(f"Using {len(devices)} selected device(s): {[d.ip for d in devices]}")
-            except (ValueError, IndexError):
-                logger.warning("Invalid selection — using all devices")
+    devices = []
+    if args.ips:
+        devices += device_manager.connect_to_ips(args.ips)
+    elif not (args.tasmota_ips or args.esphome_ips):
+        devices += device_manager.discover_devices()
+    if args.tasmota_ips:
+        devices += device_manager.connect_to_tasmota(
+            args.tasmota_ips, disable_wifi_sleep=args.tasmota_no_sleep
+        )
+    if args.esphome_ips:
+        devices += device_manager.connect_to_esphome(
+            args.esphome_ips,
+            noise_psk=args.esphome_key or os.getenv("ESPHOME_KEY"),
+            password=args.esphome_password or os.getenv("ESPHOME_PASSWORD"),
+        )
 
     events_queue = asyncio.Queue()
     spotify_listener = SpotifyChangesListener(user_id, client_id, client_secret, events_queue)
@@ -186,10 +211,10 @@ def main():
                 finally:
                     fcntl.fcntl(fd, fcntl.F_SETFL, old_fl)
                 if rest == '[A':  # up arrow
-                    light_controller.max_brightness = min(100, light_controller.max_brightness + 10)
+                    light_controller.max_brightness = min(100, light_controller.max_brightness + 5)
                     _draw_panel(light_controller, rows)
                 elif rest == '[B':  # down arrow
-                    light_controller.max_brightness = max(10, light_controller.max_brightness - 10)
+                    light_controller.max_brightness = max(5, light_controller.max_brightness - 5)
                     _draw_panel(light_controller, rows)
 
         loop.add_reader(sys.stdin.fileno(), _on_key)
@@ -199,6 +224,8 @@ def main():
             await asyncio.sleep(0.05)  # 20fps for smooth color animation
             if is_tty:
                 _draw_panel(light_controller, rows)
+
+    final_state = None
 
     try:
         loop.run_until_complete(
@@ -210,6 +237,7 @@ def main():
         )
     except KeyboardInterrupt:
         logger.info("Stopping...")
+        final_state = DesiredState(mode="ct", kelvin=_EXIT_KELVIN, brightness=_EXIT_BRIGHTNESS, duration=0.3)
     finally:
         if is_tty:
             loop.remove_reader(sys.stdin.fileno())
@@ -217,7 +245,12 @@ def main():
                 termios.tcsetattr(sys.stdin.fileno(), termios.TCSADRAIN, old_settings)
             sys.stderr.write("\033[r\033[J")
             sys.stderr.flush()
-        loop.run_until_complete(asyncio.gather(*(d.stop() for d in devices), return_exceptions=True))
+        results = loop.run_until_complete(
+            asyncio.gather(*(d.stop(final_state) for d in devices), return_exceptions=True)
+        )
+        for device, result in zip(devices, results):
+            if isinstance(result, Exception):
+                logger.error(f"[{device.ip}] stop failed: {result!r}")
 
 
 if __name__ == '__main__':
