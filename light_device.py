@@ -2,7 +2,7 @@ import asyncio
 from dataclasses import dataclass
 from typing import Optional
 from colorsys import hsv_to_rgb
-from yeelight import Bulb
+from yeelight import Bulb, SceneClass
 from loguru import logger
 
 
@@ -13,6 +13,7 @@ class DesiredState:
     hue: Optional[float] = None
     saturation: Optional[float] = None
     brightness: Optional[float] = None
+    kelvin: Optional[int] = None
     duration: float = 0.05
     replaceable: bool = False
     dispatch_at: float | None = None
@@ -54,7 +55,8 @@ class BaseLightDevice:
             loop = asyncio.get_event_loop()
         self._worker_task = loop.create_task(self._worker(), name=f"LightWorker-{self.ip}")
 
-    async def stop(self):
+    async def stop(self, final: Optional[DesiredState] = None):
+        """Stop the worker, dropping whatever is still queued, then leave the light in `final`."""
         self._stop_event.set()
         self._commands.put_nowait(None)
         if self._worker_task:
@@ -62,6 +64,8 @@ class BaseLightDevice:
                 await self._worker_task
             except Exception as e:
                 logger.error(f"Worker stop error for {self.ip}: {e}")
+        if final is not None:
+            await self._apply(final)
 
     # ---- Public API (called by controller) ----
 
@@ -198,6 +202,12 @@ class LightDevice(BaseLightDevice):
                 int(desired.brightness),
                 duration=int(desired.duration * 1000),
             )
+            self._record_latency(loop_time() - t0)
+
+        elif desired.mode == "ct":
+            logger.trace(f"[{self.ip}] apply {desired.kelvin}K at {desired.brightness}%")
+            t0 = loop_time()
+            await asyncio.to_thread(self.bulb.set_scene, SceneClass.CT, desired.kelvin, int(desired.brightness))
             self._record_latency(loop_time() - t0)
 
         elif desired.mode == "on":

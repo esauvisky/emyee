@@ -104,8 +104,8 @@ class TasmotaDevice(BaseLightDevice):
             logger.info(f"[{self.ip}] wifi sleep disabled for lower command latency")
         return self
 
-    async def stop(self):
-        await super().stop()
+    async def stop(self, final: Optional[DesiredState] = None):
+        await super().stop(final)
         self._session.close()
 
     # ---- Backend hooks ----
@@ -127,6 +127,12 @@ class TasmotaDevice(BaseLightDevice):
             bri = max(MIN_BRIGHTNESS, min(100, int(desired.brightness)))
             logger.trace(f"[{self.ip}] apply Dimmer {bri}")
             command = f"Dimmer {bri}"
+
+        elif desired.mode == "ct":
+            bri = max(MIN_BRIGHTNESS, min(100, int(desired.brightness)))
+            mireds = round(1_000_000 / desired.kelvin)
+            logger.trace(f"[{self.ip}] apply CT {mireds} Dimmer {bri}")
+            command = f"Backlog Power ON; CT {mireds}; Dimmer {bri}"
 
         elif desired.mode == "on":
             logger.trace(f"[{self.ip}] turn_on")

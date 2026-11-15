@@ -4,7 +4,7 @@ import asyncio
 from colorsys import hsv_to_rgb
 from typing import Optional
 
-from aioesphomeapi import APIClient, ColorMode, LightInfo
+from aioesphomeapi import APIClient, ColorMode, LightColorCapability, LightInfo
 from loguru import logger
 
 from light_device import BaseLightDevice, DesiredState
@@ -50,6 +50,7 @@ class ESPHomeDevice(BaseLightDevice):
         self._client: Optional[APIClient] = None
         self._key: Optional[int] = None
         self._color_mode: Optional[int] = None
+        self._white_modes: list[int] = []
 
     # ---- Connection ----
 
@@ -83,6 +84,11 @@ class ESPHomeDevice(BaseLightDevice):
             if not rgb_capable:
                 raise RuntimeError(f"{self.ip} light {light.name!r} has no RGB colour mode: {modes}")
             self._color_mode = int(rgb_capable[0])
+        tunable = int(LightColorCapability.COLOR_TEMPERATURE | LightColorCapability.COLD_WARM_WHITE)
+        self._white_modes = [
+            int(m) for m in modes
+            if int(m) & tunable and not int(m) & int(LightColorCapability.RGB)
+        ]
 
         logger.info(
             f"ESPHome {self.model} at {self.ip} — firmware {info.esphome_version}, "
@@ -90,8 +96,8 @@ class ESPHomeDevice(BaseLightDevice):
         )
         return self
 
-    async def stop(self):
-        await super().stop()
+    async def stop(self, final: Optional[DesiredState] = None):
+        await super().stop(final)
         await self._client.disconnect()
 
     # ---- Backend hooks ----
@@ -132,6 +138,20 @@ class ESPHomeDevice(BaseLightDevice):
                 key=self._key,
                 state=True,
                 brightness=bri / 100,
+                transition_length=desired.duration,
+            )
+
+        elif desired.mode == "ct":
+            if not self._white_modes:
+                raise RuntimeError(f"{self.ip} has no white colour mode separate from RGB to set {desired.kelvin}K in")
+            bri = self._visible(desired.brightness)
+            logger.trace(f"[{self.ip}] apply {desired.kelvin}K at {bri:.1f} over {desired.duration:.3f}s")
+            self._client.light_command(
+                key=self._key,
+                state=True,
+                brightness=bri / 100,
+                color_mode=self._white_modes[0],
+                color_temperature=1_000_000 / desired.kelvin,
                 transition_length=desired.duration,
             )
 
