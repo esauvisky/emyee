@@ -21,8 +21,8 @@ OFF_MIN_ACTIVITY = 0.9
 
 def band_for(activity: float) -> tuple[float, float]:
     """(bottom, top) levels a section with this activity (0–1) swings between."""
-    top = 1.0 - 0.3 * (1 - activity)
-    bottom = top * 0.75 * (1 - activity)
+    top = 1.0 - 0.15 * (1 - activity)
+    bottom = top * 0.85 * (1 - activity)
     if activity < OFF_MIN_ACTIVITY:
         bottom = max(bottom, (VISIBLE_MIN / 100) ** (1 / PERCEPTUAL_GAMMA))
     return bottom, top
