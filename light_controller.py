@@ -37,6 +37,10 @@ QUIET_LOOKBACK_BARS = 8
 FLOW_MAX_ONSET_DB = 8.0
 FLOW_MAX_BEAT_CONFIDENCE = 0.5
 FLOW_MIN_BARS = 2
+# A bar within this many dB of the track's loud bars (90th percentile) is
+# never flow: a brickwalled drop has no headroom for an onset to rise into
+# and loses Spotify's beat tracker, yet it is the loudest part of the song.
+FLOW_QUIET_DB = 6.0
 # Each flow bar drifts the hue to the nearest palette colour this far up the
 # wheel over the whole bar. The palette's widest gap is 40 degrees, so there
 # is always one in range.
@@ -384,15 +388,21 @@ class LightsController:
         logger.debug("Quiet bars: {}", ' '.join(str(index) for index in sorted(self._quiet_bars)))
 
     def _compute_flow_bars(self):
-        """Bars without transients: soft segment onsets and beats Spotify
-        only inferred from the tempo. Gaps shorter than FLOW_MIN_BARS inside
-        a flow run are flow; runs shorter than it are not."""
+        """Bars without transients: soft segment onsets, beats Spotify only
+        inferred from the tempo, and FLOW_QUIET_DB under the track's loud
+        bars. Gaps shorter than FLOW_MIN_BARS inside a flow run are flow;
+        runs shorter than it are not."""
+        # The min_confidence filter can leave a track without bars.
+        if not self.bars:
+            self._flow_bars = set()
+            return
         segments = self.analysis.get('segments', [])
         segment_starts = [s.get('start', 0.0) for s in segments]
         beats = self.analysis['beats']
         beat_starts = [b['start'] for b in beats]
+        loud = float(np.percentile(self._bar_loudness, 90))
         flags = []
-        for bar in self.bars:
+        for index, bar in enumerate(self.bars):
             start = bar['start']
             end = start + bar.get('duration', 0.0)
             in_bar = segments[bisect.bisect_left(segment_starts, start):bisect.bisect_left(segment_starts, end)]
@@ -400,7 +410,10 @@ class LightsController:
             # A bar with no segments or no beats has nothing to pulse on.
             onset = float(np.mean([s['loudness_max'] - s['loudness_start'] for s in in_bar])) if in_bar else 0.0
             confidence = float(np.mean([b.get('confidence', 1.0) for b in beats_in_bar])) if beats_in_bar else 0.0
-            flags.append(onset < FLOW_MAX_ONSET_DB and confidence < FLOW_MAX_BEAT_CONFIDENCE)
+            flags.append(
+                onset < FLOW_MAX_ONSET_DB and confidence < FLOW_MAX_BEAT_CONFIDENCE
+                and self._bar_loudness[index] < loud - FLOW_QUIET_DB
+            )
 
         def runs():
             out = []
