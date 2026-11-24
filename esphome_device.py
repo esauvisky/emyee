@@ -23,6 +23,10 @@ CONNECT_TIMEOUT = 20.0
 OUTPUT_GAMMA = 2.2
 
 
+class UnsupportedLightError(RuntimeError):
+    pass
+
+
 class ESPHomeDevice(BaseLightDevice):
     """An ESPHome light (RGB or RGBCW) spoken to over the native API.
 
@@ -71,7 +75,8 @@ class ESPHomeDevice(BaseLightDevice):
         entities, _ = await self._client.list_entities_services()
         lights = [e for e in entities if isinstance(e, LightInfo)]
         if not lights:
-            raise RuntimeError(f"{self.ip} is an ESPHome device ({self.model}) but exposes no light entity")
+            await self._client.disconnect()
+            raise UnsupportedLightError(f"{self.ip} is an ESPHome device ({self.model}) but exposes no light entity")
         light = lights[0]
         self._key = light.key
 
@@ -82,7 +87,8 @@ class ESPHomeDevice(BaseLightDevice):
             # Anything else this controller can meaningfully colour-shift.
             rgb_capable = [m for m in modes if (int(m) & int(ColorMode.RGB)) == int(ColorMode.RGB)]
             if not rgb_capable:
-                raise RuntimeError(f"{self.ip} light {light.name!r} has no RGB colour mode: {modes}")
+                await self._client.disconnect()
+                raise UnsupportedLightError(f"{self.ip} light {light.name!r} has no RGB colour mode: {modes}")
             self._color_mode = int(rgb_capable[0])
         tunable = int(LightColorCapability.COLOR_TEMPERATURE | LightColorCapability.COLD_WARM_WHITE)
         self._white_modes = [

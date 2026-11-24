@@ -1,13 +1,52 @@
 # device_manager.py
-from typing import List, Optional
+from typing import Dict, List, Optional
 import asyncio
 import socket
 from yeelight import discover_bulbs, Bulb
 from loguru import logger
+from zeroconf import IPVersion, ServiceStateChange
+from zeroconf.asyncio import AsyncServiceBrowser, AsyncZeroconf
 from light_device import LightDevice
 from tasmota_device import TasmotaDevice
-from esphome_device import ESPHomeDevice
+from esphome_device import DEFAULT_PORT, ESPHomeDevice, UnsupportedLightError
 from lan_reset import reset_device
+
+ESPHOME_SERVICE_TYPE = "_esphomelib._tcp.local."
+ESPHOME_DISCOVERY_TIME = 2.0
+
+
+async def async_discover_esphome_devices() -> Dict[str, tuple[int, bool]]:
+    """{ip: (api port, api encrypted)} for every ESPHome node answering mDNS."""
+    services = set()
+
+    def on_service_state_change(zeroconf, service_type, name, state_change):
+        if state_change is ServiceStateChange.Removed:
+            services.discard(name)
+        else:
+            services.add(name)
+
+    devices = {}
+    async with AsyncZeroconf(ip_version=IPVersion.V4Only) as aiozc:
+        async with AsyncServiceBrowser(
+            aiozc.zeroconf, ESPHOME_SERVICE_TYPE, handlers=[on_service_state_change]
+        ):
+            await asyncio.sleep(ESPHOME_DISCOVERY_TIME)
+
+        service_names = sorted(services)
+        service_infos = await asyncio.gather(*(
+            aiozc.async_get_service_info(ESPHOME_SERVICE_TYPE, name, timeout=1000)
+            for name in service_names
+        ))
+        for name, info in zip(service_names, service_infos):
+            if info is None:
+                logger.warning("ESPHome service disappeared during discovery: {}", name)
+                continue
+            encrypted = b"api_encryption" in info.properties
+            for ip in info.parsed_addresses(IPVersion.V4Only):
+                devices[ip] = (info.port, encrypted)
+
+    logger.info("Discovered {} ESPHome node(s): {}", len(devices), sorted(devices))
+    return devices
 
 def get_real_local_ip_for(target_ip: str) -> str:
     """Resolve a interface de rede real que chega na lâmpada (ignora docker/loopback)."""
@@ -118,17 +157,29 @@ class DeviceManager:
         return devices
 
     def connect_to_esphome(
-        self, ips: List[str], noise_psk: Optional[str] = None, password: Optional[str] = None
+        self, ips: Optional[List[str]] = None, noise_psk: Optional[str] = None,
+        password: Optional[str] = None
     ) -> List[ESPHomeDevice]:
-        logger.info("Connecting to {} ESPHome light(s): {}", len(ips), ips)
         # The aioesphomeapi connection is bound to the loop it is opened on, so
         # it has to be the same default loop main.py later runs the workers on.
         loop = asyncio.get_event_loop()
+        if ips is None:
+            targets = {}
+            for ip, (port, encrypted) in loop.run_until_complete(async_discover_esphome_devices()).items():
+                if encrypted and not noise_psk:
+                    logger.warning(f"Skipping encrypted ESPHome node at {ip}: no ESPHOME_KEY")
+                    continue
+                targets[ip] = (port, noise_psk if encrypted else None)
+        else:
+            targets = {ip: (DEFAULT_PORT, noise_psk) for ip in ips}
+        logger.info("Connecting to {} ESPHome device(s): {}", len(targets), sorted(targets))
         devices: List[ESPHomeDevice] = []
-        for ip in ips:
-            device = ESPHomeDevice(ip, noise_psk=noise_psk, password=password)
+        for ip, (port, psk) in targets.items():
+            device = ESPHomeDevice(ip, port, noise_psk=psk, password=password)
             try:
                 devices.append(loop.run_until_complete(device.connect()))
+            except UnsupportedLightError as e:
+                logger.debug("Ignoring ESPHome node without a light: {}", e)
             except Exception as e:
                 logger.error(f"Failed to initialize ESPHome light at {ip}: {e}")
         logger.info(f"Connected to {len(devices)} ESPHome light(s).")

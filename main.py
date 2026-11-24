@@ -89,6 +89,10 @@ def main():
         help="Skip the LAN control off→on cycle before discovery",
     )
     parser.add_argument(
+        "--yeelight-discover", action="store_true",
+        help="Discover Yeelight bulbs instead of ESPHome lights",
+    )
+    parser.add_argument(
         "--ip", metavar="IP", action="append", dest="ips",
         help="Connect directly to this bulb IP (skip discovery); repeat for multiple bulbs",
     )
@@ -98,7 +102,7 @@ def main():
     )
     parser.add_argument(
         "--esphome", metavar="IP", action="append", dest="esphome_ips",
-        help="Drive an ESPHome light over the native API at this IP; repeat for multiple lights",
+        help="Drive only these ESPHome lights instead of discovering them over mDNS; repeat for multiple lights",
     )
     parser.add_argument(
         "--esphome-key", metavar="KEY",
@@ -148,13 +152,13 @@ def main():
     devices = []
     if args.ips:
         devices += device_manager.connect_to_ips(args.ips)
-    elif not (args.tasmota_ips or args.esphome_ips):
+    elif args.yeelight_discover:
         devices += device_manager.discover_devices()
     if args.tasmota_ips:
         devices += device_manager.connect_to_tasmota(
             args.tasmota_ips, disable_wifi_sleep=args.tasmota_no_sleep
         )
-    if args.esphome_ips:
+    if args.esphome_ips or not (args.ips or args.yeelight_discover or args.tasmota_ips):
         devices += device_manager.connect_to_esphome(
             args.esphome_ips,
             noise_psk=args.esphome_key or os.getenv("ESPHOME_KEY"),
