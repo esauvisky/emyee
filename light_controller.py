@@ -24,8 +24,10 @@ from atmospheric import VISIBLE_MIN, band_for, profile_for, pulses_for, to_brigh
 from light_device import BaseLightDevice
 from sections import detect_sections
 
-# A bar this many dB under the median of the QUIET_LOOKBACK_BARS before it
-# is a breakdown: held at its resting level instead of pulsing.
+# A bar whose loudest hit is this many dB under the median loudest hit of the
+# QUIET_LOOKBACK_BARS before it is a breakdown: held at its resting level
+# instead of pulsing. Judged on the loudest hit, not the bar's average: a
+# bare kick with silence between the hits averages low but is no breakdown.
 QUIET_BAR_DB = 5.0
 QUIET_LOOKBACK_BARS = 8
 # A bar whose segments rise under FLOW_MAX_ONSET_DB from onset to peak and
@@ -365,6 +367,7 @@ class LightsController:
         segments = self.analysis.get('segments', [])
         segment_starts = [s.get('start', 0.0) for s in segments]
         self._bar_loudness = []
+        peaks = []
         for bar in self.bars:
             start = bar['start']
             end = start + bar.get('duration', 0.0)
@@ -373,11 +376,10 @@ class LightsController:
             self._bar_loudness.append(
                 float(np.mean([s.get('loudness_max', -20.0) for s in in_bar])) if in_bar else -60.0
             )
+            peaks.append(max((s.get('loudness_max', -20.0) for s in in_bar), default=-60.0))
         self._quiet_bars = {
             index for index in range(1, len(self.bars))
-            if self._bar_loudness[index] < float(np.median(
-                self._bar_loudness[max(0, index - QUIET_LOOKBACK_BARS):index]
-            )) - QUIET_BAR_DB
+            if peaks[index] < float(np.median(peaks[max(0, index - QUIET_LOOKBACK_BARS):index])) - QUIET_BAR_DB
         }
         logger.debug("Quiet bars: {}", ' '.join(str(index) for index in sorted(self._quiet_bars)))
 
