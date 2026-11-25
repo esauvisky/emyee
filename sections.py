@@ -25,6 +25,20 @@ CHROMA_WEIGHT = 3.0
 # Digital silence reads -60 dB; left unclamped a silent bar would outweigh
 # every musical difference in the track.
 LOUDNESS_FLOOR_DB = -40.0
+# A drop is a part whose first DROP_WINDOW_BARS sound far closer to the
+# track's peak sound than the DROP_WINDOW_BARS before it: the build strips the
+# mix down, the drop brings it all back at once. The peak sound is the mean
+# loudness and timbre of the loudest DROP_PEAK_SHARE of bars; chords are left
+# out, a drop changes the mix, not the harmony. In the feature units above,
+# the distance has to at least halve (DROP_MAX_RATIO), shrink by DROP_MIN_FALL
+# (about 4 dB at the same timbre) and end within DROP_MAX_ARRIVAL (about
+# 9 dB), so a quiet intro getting less quiet is no drop.
+DROP_WINDOW_BARS = 4
+DROP_PEAK_SHARE = 0.25
+DROP_MAX_RATIO = 0.5
+DROP_MIN_FALL = 1.25
+DROP_MAX_ARRIVAL = 3.0
+DROP_MIN_BARS = 4
 
 
 def bar_features(analysis: dict, bars: list[dict]) -> np.ndarray:
@@ -84,23 +98,64 @@ def part_starts(features: np.ndarray) -> list[int]:
     return cuts[::-1]
 
 
+def peak_approaches(features: np.ndarray, cuts: list[int]) -> list[tuple[float, float]]:
+    """For each part after the first, its distance from the track's peak
+    sound over the DROP_WINDOW_BARS before its first bar and over its own
+    first DROP_WINDOW_BARS."""
+    sound = features[:, :13]
+    loudest = sound[:, 0] >= np.quantile(sound[:, 0], 1 - DROP_PEAK_SHARE)
+    distance = np.linalg.norm(sound - sound[loudest].mean(axis=0), axis=1)
+    ends = cuts[2:] + [len(features)]
+    return [
+        (float(distance[max(0, start - DROP_WINDOW_BARS):start].mean()),
+         float(distance[start:min(end, start + DROP_WINDOW_BARS)].mean()))
+        for start, end in zip(cuts[1:], ends)
+    ]
+
+
+def drop_verdict(before: float, after: float, bars: int) -> tuple[bool, str]:
+    """Whether a part that moves from `before` to `after` away from the peak
+    sound is a drop, and the numbers that decided it."""
+    numbers = f"peak distance {before:.2f} → {after:.2f} (x{after / before:.2f})"
+    if bars < DROP_MIN_BARS:
+        return False, f"{numbers}, only {bars} bars (drops need {DROP_MIN_BARS})"
+    if after > DROP_MAX_RATIO * before:
+        return False, f"{numbers}, needs x{DROP_MAX_RATIO:.2f} or less"
+    if before - after < DROP_MIN_FALL:
+        return False, f"{numbers}, closer by only {before - after:.2f} (needs {DROP_MIN_FALL:.2f})"
+    if after > DROP_MAX_ARRIVAL:
+        return False, f"{numbers}, lands too far from the peak (needs {DROP_MAX_ARRIVAL:.2f} or less)"
+    return True, numbers
+
+
 def detect_sections(analysis: dict, bars: list[dict]) -> list[dict]:
     """Split the track into parts of uniform loudness, timbre and harmony,
-    each starting on a bar."""
+    each starting on a bar, and mark the parts that are drops."""
     segments = analysis["segments"]
     duration = analysis["track"]["duration"]
-    boundaries = [0.0, duration]
+    cuts = [0]
+    approaches = []
     if len(bars) >= 2 * MIN_PART_BARS:
-        boundaries[1:1] = [bars[index]["start"] for index in part_starts(bar_features(analysis, bars))]
+        features = bar_features(analysis, bars)
+        cuts += part_starts(features)
+        approaches = peak_approaches(features, cuts)
+    boundaries = [0.0] + [bars[index]["start"] for index in cuts[1:]] + [duration]
+    lengths = np.diff(cuts + [len(bars)])
 
+    # The first part has nothing before it to drop from.
+    verdicts = [(False, "first part")] + [
+        drop_verdict(before, after, int(length)) for (before, after), length in zip(approaches, lengths[1:])
+    ]
     sections = []
-    for start, end in zip(boundaries, boundaries[1:]):
+    for (start, end), (drop, why) in zip(zip(boundaries, boundaries[1:]), verdicts):
         section_segments = [s for s in segments if start <= s["start"] < end]
         sections.append({
             "start": start,
             "duration": end - start,
             "confidence": 1.0,
             "loudness": float(np.mean([s["loudness_max"] for s in section_segments])) if section_segments else -20.0,
+            "drop": drop,
+            "drop_why": why,
         })
     return sections
 
@@ -119,8 +174,14 @@ def _check():
     sections = detect_sections({"track": {"duration": 24.0}, "segments": segments}, bars)
     assert [section["start"] for section in sections] == [0.0, 8.0, 12.0], [section["start"] for section in sections]
     assert sum(section["duration"] for section in sections) == 24.0
+    assert sections[2]["drop"] and not sections[0]["drop"], [section["drop_why"] for section in sections]
     short = detect_sections({"track": {"duration": 3.0}, "segments": segments[:6]}, bars[:3])
     assert [section["start"] for section in short] == [0.0]
+    assert not short[0]["drop"]
+    assert drop_verdict(3.3, 1.4, 8)[0]
+    assert not drop_verdict(3.3, 1.4, 3)[0]
+    assert not drop_verdict(12.8, 6.1, 8)[0]
+    assert not drop_verdict(2.0, 1.0, 8)[0]
 
 
 if __name__ == "__main__":

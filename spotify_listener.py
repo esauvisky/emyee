@@ -91,13 +91,13 @@ class SpotifyChangesListener:
                     if current_playing is None:
                         if self.current_track_id is not None:
                             self.current_track_id = None
-                            await self.events_queue.put(EventStop())
+                            await self.events_queue.put(EventStop("nothing is playing on Spotify"))
                         self.last_api_update_time = receive_time
                         continue
 
                     if not current_playing.get('is_playing', False):
                         self.current_track_id = None
-                        await self.events_queue.put(EventStop())
+                        await self.events_queue.put(EventStop("playback is paused"))
                         self.last_api_update_time = receive_time
                         continue
 
@@ -127,7 +127,7 @@ class SpotifyChangesListener:
                         if self.current_track_id != item.get('id'):
                             logger.warning("Ignoring non-track Spotify item type: {}", item.get('type'))
                             self.current_track_id = item.get('id')
-                            await self.events_queue.put(EventStop())
+                            await self.events_queue.put(EventStop(f"playing a {item.get('type')}, not a track"))
                         self.last_api_update_time = receive_time
                         continue
 
@@ -139,7 +139,7 @@ class SpotifyChangesListener:
                         self._progress_correction_target = 0.0
                         self._progress_last_emit_mono = now_mono
                         if self.current_track_id is not None:
-                            await self.events_queue.put(EventStop())
+                            await self.events_queue.put(EventStop("the track changed"))
                         self.current_track_id = current_track_id
                         song_name = item.get('name', 'Unknown')
                         artist_names = ', '.join(a.get('name', '') for a in item.get('artists', []))
@@ -152,7 +152,7 @@ class SpotifyChangesListener:
                         analysis = await self._get_audio_analysis(session, current_track_id)
                         if analysis is None:
                             logger.warning("No audio analysis available for track id {}", current_track_id)
-                            await self.events_queue.put(EventStop())
+                            await self.events_queue.put(EventStop("Spotify has no audio analysis for this track"))
                             self.last_api_update_time = receive_time
                             continue
                         await self.events_queue.put(EventSongChanged(

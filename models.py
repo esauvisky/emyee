@@ -39,8 +39,11 @@ class EventAdjustProgressTime:
 class EventStop:
     """
     Represents an event indicating that playback has stopped.
+
+    Attributes:
+        reason: Why the lights stop, for the log.
     """
-    pass
+    reason: str
 
 @dataclass
 class Device:

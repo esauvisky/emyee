@@ -137,7 +137,7 @@ def main():
 
     rows = _get_rows()
     is_tty = sys.stdin.isatty() and sys.stderr.isatty()
-    setup_logging("TRACE")
+    setup_logging("DEBUG")
     old_settings = None
 
     tokens = {}
@@ -191,7 +191,7 @@ def main():
                 sys.stderr.flush()
                 _draw_panel(light_controller, rows)
 
-        setup_logging("TRACE", sink=_panel_sink)
+        setup_logging("DEBUG", sink=_panel_sink)
         _draw_panel(light_controller, rows)
 
     loop = asyncio.get_event_loop()
