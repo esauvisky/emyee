@@ -36,16 +36,24 @@ QUIET_DARK_DB = 15.0
 # A run of segments at least SILENCE_MIN_S long whose loudest moment is
 # SILENCE_TRACK_DB under the track's loud bars (90th percentile) and
 # SILENCE_LOCAL_DB under the median loudest hit of the SILENCE_LOOKBACK_BARS
-# before it is a near-silent gap (the breath before a drop): the lights go to
-# 0% for it and come back on the next beat after it. The local test keeps a
-# quiet intro, which is far under the loud bars all along, from blacking out.
+# before it is a near-silent gap (the breath before a drop): the lights fall
+# fast to a dim level and come back on the next beat after it. The local test
+# keeps a quiet intro, which is far under the loud bars all along, from
+# dimming; the first bar, with no bars before it, is judged against itself.
 SILENCE_TRACK_DB = 24.0
 SILENCE_LOCAL_DB = 15.0
 SILENCE_LOOKBACK_BARS = 4
 SILENCE_MIN_S = 0.25
-# A silence's blackout is scheduled this far ahead, like a beat.
+# A silence's dimming is scheduled this far ahead, like a beat.
 SILENCE_LEAD_S = 0.5
-SILENCE_FADE_S = 0.05
+# A gap falls to SILENCE_DIM_BRIGHTNESS (or the phrase's resting level, if
+# lower) over SILENCE_FADE_S, capped at a third of the gap so a short one
+# still gets to rest. Only a gap of at least SILENCE_DARK_MIN_S then carries
+# on to real 0%, over SILENCE_DARK_FADE_S.
+SILENCE_DIM_BRIGHTNESS = 4.0
+SILENCE_FADE_S = 0.15
+SILENCE_DARK_MIN_S = 1.0
+SILENCE_DARK_FADE_S = 0.4
 # A bar whose segments rise under FLOW_MAX_ONSET_DB from onset to peak and
 # whose beats Spotify is less than FLOW_MAX_BEAT_CONFIDENCE sure of has no
 # transients to pulse on (a vocal over a pad): it flows instead. Runs
@@ -460,7 +468,7 @@ class LightsController:
     def _compute_silences(self):
         """Near-silent gaps between hits: runs of segments far under both the
         track's loud bars and the bars just before them, lasting at least
-        SILENCE_MIN_S. The lights black out for them."""
+        SILENCE_MIN_S. The lights dim for them, and long ones go dark."""
         # The min_confidence filter can leave a track without bars.
         if not self.bars:
             self._silences, self._silence_starts = [], []
@@ -471,11 +479,9 @@ class LightsController:
         run = None
         for segment in self.analysis['segments']:
             bar = max(0, bisect.bisect_right(bar_starts, segment['start']) - 1)
-            # The first bar has no bars before it; only the track level applies.
-            local = (
-                float(np.median(self._bar_peaks[max(0, bar - SILENCE_LOOKBACK_BARS):bar])) - SILENCE_LOCAL_DB
-                if bar else float('inf')
-            )
+            # The first bar has no bars before it, so it is its own reference.
+            before = self._bar_peaks[max(0, bar - SILENCE_LOOKBACK_BARS):bar] or [self._bar_peaks[0]]
+            local = float(np.median(before)) - SILENCE_LOCAL_DB
             if segment['loudness_max'] < min(loud - SILENCE_TRACK_DB, local):
                 end = segment['start'] + segment['duration']
                 run = (run[0], end, max(run[2], segment['loudness_max'])) if run else (segment['start'], end, segment['loudness_max'])
@@ -489,9 +495,15 @@ class LightsController:
         for start, end, peak in self._silences:
             logger.debug(
                 "Silence {:.2f}–{:.2f}s: loudest {:.1f} dB, at least {} dB under the loud bars ({:.1f} dB) and {} dB "
-                "under the bars before, so the lights go dark until the next hit",
+                "under the bars before, so the lights dim until the next hit{}",
                 start, end, peak, SILENCE_TRACK_DB, loud, SILENCE_LOCAL_DB,
+                f" and, at {end - start:.2f}s (at least {SILENCE_DARK_MIN_S}s), go dark" if end - start >= SILENCE_DARK_MIN_S else "",
             )
+
+    def _silence_dim_level(self, start: float) -> float:
+        """Brightness a silence starting at `start` falls to before any dark stage."""
+        energy = self._section_energies[self._section_index_for_time(start)]
+        return min(SILENCE_DIM_BRIGHTNESS, to_brightness(band_for(energy)[0]))
 
     def _silence_at(self, song_time: float) -> tuple[float, float, float] | None:
         index = bisect.bisect_right(self._silence_starts, song_time) - 1
@@ -499,9 +511,11 @@ class LightsController:
             return self._silences[index]
         return None
 
-    def _silence_starting_in(self, start: float, end: float) -> bool:
+    def _silence_starting_in(self, start: float, end: float) -> tuple[float, float, float] | None:
         index = bisect.bisect_right(self._silence_starts, start)
-        return index < len(self._silences) and self._silences[index][0] < end
+        if index < len(self._silences) and self._silences[index][0] < end:
+            return self._silences[index]
+        return None
 
     def _silence_ended_in(self, start: float, end: float) -> bool:
         index = bisect.bisect_right(self._silence_starts, end) - 1
@@ -768,9 +782,16 @@ class LightsController:
         ):
             self._silence_scheduled_for = silence_index
             start, end, _ = self._silences[silence_index]
-            logger.debug("Silence {:.2f}–{:.2f}s: dark until the next hit", start, end)
-            self._start_beat_task(self._scheduled_hold(
-                time.monotonic() + max(0.0, start - current_time), SILENCE_FADE_S, 0.0,
+            dim = self._silence_dim_level(start)
+            fade_s = min(SILENCE_FADE_S, (end - start) / 3)
+            dark = end - start >= SILENCE_DARK_MIN_S
+            logger.debug(
+                "Silence {:.2f}–{:.2f}s: fall to {:.1f}% over {:.2f}s{}",
+                start, end, self._scale_brightness(dim), fade_s,
+                f", then to 0% over {SILENCE_DARK_FADE_S}s" if dark else ", held until the next hit",
+            )
+            self._start_beat_task(self._scheduled_silence(
+                time.monotonic() + max(0.0, start - current_time), fade_s, dim, dark,
             ))
 
         next_beat_idx = bisect.bisect_right(self._beat_starts, current_time)
@@ -919,8 +940,10 @@ class LightsController:
                 strength = pulse * (0.5 + 0.5 * self._segment_loudness(self.segments[seg_idx]))
                 low = to_brightness(bottom * fade)
                 # A release landing after the blackout would relight the lamp.
-                if self._silence_starting_in(next_beat['start'], next_beat['start'] + beat_len):
-                    low = 0.0
+                upcoming = self._silence_starting_in(next_beat['start'], next_beat['start'] + beat_len)
+                if upcoming:
+                    start, end, _ = upcoming
+                    low = 0.0 if end - start >= SILENCE_DARK_MIN_S else min(low, self._silence_dim_level(start))
                 high = to_brightness((bottom + (top - bottom) * strength) * fade)
                 energy_color = ("blue", "cyan", "green", "yellow", "red")[energy_level]
                 logger.opt(colors=True).trace(
@@ -988,6 +1011,11 @@ class LightsController:
                 target_saturation=saturation,
                 deadline=deadline,
             )
+
+    async def _scheduled_silence(self, deadline: float, fade_s: float, dim: float, dark: bool):
+        await self._scheduled_hold(deadline, fade_s, dim)
+        if dark:
+            await self._scheduled_hold(deadline + fade_s, SILENCE_DARK_FADE_S, 0.0)
 
     async def _scheduled_hold(self, deadline: float, duration: float, resting: float):
         await asyncio.sleep(max(0.0, deadline - self._device_latency() - time.monotonic()))
