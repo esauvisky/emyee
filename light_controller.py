@@ -23,7 +23,7 @@ import numpy as np
 from atmospheric import VISIBLE_MIN, band_for, profile_for, pulses_for, to_brightness
 from light_device import BaseLightDevice
 from sections import (
-    DOWNBEAT_SPANS, MIN_PART_BARS, bar_features, detect_sections, downbeat_shares, downbeat_shift, shift_bars,
+    DOWNBEAT_SPANS, MIN_PART_BARS, bar_features, bar_grids, detect_sections, downbeat_shift, shift_bars, steady_bars,
     texture_steps,
 )
 
@@ -120,7 +120,7 @@ ANALYSIS_RULES = {'downbeat_fix'}
 # Mechanics that can be switched off at runtime (from the web app) to judge
 # each one by eye. All start on. RULES.md describes every rule in full.
 RULES = {
-    'downbeat_fix': "Bars move onto the beat the music's changes land on when Spotify's downbeat is off",
+    'downbeat_fix': "Bars follow a steady beat grid when Spotify's slip, with beat 1 where the music's changes land",
     'colour_changes': "Each phrase crosses into a new palette colour over its last bar",
     'strobe': "The first bar of every drop strobes a new colour every eighth note",
     'flow': "Bars without transients drift slowly instead of pulsing",
@@ -289,7 +289,7 @@ class LightsController:
             key=lambda x: x['start'],
         )
         self._beat_starts = [b['start'] for b in self.beats]
-        self._fix_downbeat()
+        self._fix_bar_grid()
         self._parts = detect_sections(self.analysis, self.bars)
         self._part_energies = self._energies_for(self._parts)
         logger.debug(
@@ -397,28 +397,41 @@ class LightsController:
         """Song position now, run on from the last progress tick."""
         return self._last_progress + (time.monotonic() - self._last_progress_mono)
 
-    def _fix_downbeat(self):
-        """Move Spotify's bars onto the beat the music's changes land on
-        (sections.py): part, phrase, colour and strobe boundaries follow."""
+    def _fix_bar_grid(self):
+        """Lay the bars on the grid the music's changes gather on (Spotify's
+        bars, or a steady grid over its beats when its bars slip), with beat 1
+        on the beat those changes land on (sections.py). Parts, phrases,
+        colour changes and drop effects all follow the bars."""
         # A track too short for the longest window can't be judged.
         if len(self.bars) < 2 or len(self.beats) < 2 * max(DOWNBEAT_SPANS) + 5:
-            logger.debug("Downbeat: too few beats to judge, Spotify's bars kept")
+            logger.debug("Bars: too few beats to judge, Spotify's bars kept")
             return
-        per_bar, shares = downbeat_shares(self.analysis, self.bars, self.beats)
+        grids = bar_grids(self.analysis, self.bars, self.beats)
+        per_bar = grids['per_bar']
+        steady = grids['steady'].max() >= grids['spotify'].max()
+        shares = grids['steady' if steady else 'spotify']
         shift = downbeat_shift(shares)
-        spread = ', '.join(f"beat {index + 1} {100 * share:.0f}%" for index, share in enumerate(shares))
-        if not shift:
-            logger.debug("Downbeat: changes by beat of Spotify's {}-beat bars: {}. No beat stands out over beat 1, "
-                         "Spotify's bars kept", per_bar, spread)
-            return
+
+        def spread(values):
+            return ', '.join(f"beat {index + 1} {100 * share:.0f}%" for index, share in enumerate(values))
+
+        grid = (
+            f"Spotify's {per_bar}-beat bars slip {grids['slips']} time(s). Music's changes on Spotify's bars: "
+            f"{spread(grids['spotify'])}; on a steady {per_bar}-beat grid: {spread(grids['steady'])}. "
+            + ("The steady grid gathers them more sharply" if steady else "Spotify's bars gather them more sharply")
+        )
+        beat_one = (
+            f"beat {shift + 1} is the real downbeat, so beat 1 moves {shift} beat(s) later" if shift
+            else "no beat stands out over beat 1, so it stays"
+        )
         if not self.rules['downbeat_fix']:
-            logger.debug("Downbeat: changes by beat of Spotify's {}-beat bars: {}. Bars would move {} beat(s) later, "
-                         "but the downbeat_fix rule is off", per_bar, spread, shift)
+            logger.debug("Bars: {}; {}. The downbeat_fix rule is off, so Spotify's bars are kept", grid, beat_one)
             return
-        self.bars = shift_bars(self.bars, self.beats, shift)
-        logger.info("Downbeat: changes by beat of Spotify's {}-beat bars: {}. Spotify's beat {} is the real downbeat, "
-                    "so every bar moves {} beat(s) later (first bar now {:.2f}s)",
-                    per_bar, spread, shift + 1, shift, self.bars[0]['start'])
+        if steady:
+            self.bars = steady_bars(self.bars, self.beats, per_bar, grids['first_beat'] + shift)
+        elif shift:
+            self.bars = shift_bars(self.bars, self.beats, shift)
+        logger.info("Bars: {}; {} (first bar now {:.2f}s)", grid, beat_one, self.bars[0]['start'])
 
     def _split_phrases(self) -> list[dict]:
         """Cut each part into phrases of a fixed bar count, counted from its
