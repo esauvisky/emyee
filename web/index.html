@@ -1,0 +1,492 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>emyee</title>
+<style>
+  :root { color-scheme: dark; --bg: #101012; --panel: #18181b; --line: #2a2a2f; --text: #e2e2e6; --dim: #8a8a93; --on: #4caf7a; --drop: #ff4fd8; --silence: #ff5a4f; }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text); font: 14px/1.4 system-ui, sans-serif; }
+  header { display: grid; grid-template-columns: 140px 1fr auto; gap: 16px; align-items: center; padding: 12px 16px; border-bottom: 1px solid var(--line); }
+  #swatch { height: 64px; border-radius: 8px; border: 1px solid var(--line); }
+  #song { font-size: 18px; font-weight: 600; }
+  #artists, #readout, #next { color: var(--dim); font-variant-numeric: tabular-nums; }
+  #mode { font-size: 12px; text-transform: uppercase; letter-spacing: .08em; padding: 4px 10px; border-radius: 999px; border: 1px solid var(--line); }
+  #mode.strobe { border-color: var(--drop); color: var(--drop); } #mode.quiet { color: #ccc; } #mode.flow { color: #6cb6de; border-color: #2f6d8f; }
+  #status { color: var(--dim); font-size: 12px; text-align: right; }
+  section.timeline { padding: 8px 16px 4px; border-bottom: 1px solid var(--line); }
+  canvas { display: block; width: 100%; }
+  #overview { height: 34px; cursor: default; }
+  #live { height: 300px; margin-top: 6px; }
+  .timeline-bar { display: flex; gap: 16px; align-items: center; color: var(--dim); font-size: 12px; padding: 6px 0; }
+  #hover { flex: 1; font-variant-numeric: tabular-nums; color: var(--text); min-height: 1.4em; }
+  .grid { display: grid; grid-template-columns: minmax(280px, 1fr) minmax(280px, 1fr) minmax(360px, 1.6fr); gap: 0; }
+  .grid > div { padding: 12px 16px; border-right: 1px solid var(--line); min-width: 0; }
+  h2 { font-size: 12px; text-transform: uppercase; letter-spacing: .08em; color: var(--dim); margin: 14px 0 8px; display: flex; gap: 8px; align-items: center; }
+  h2:first-child { margin-top: 0; }
+  h2 .spacer { flex: 1; }
+  h3 { font-size: 12px; color: var(--dim); margin: 12px 0 4px; font-weight: 600; }
+  .light { display: grid; grid-template-columns: auto 1fr auto; gap: 0 10px; align-items: center; padding: 6px 0; border-bottom: 1px solid var(--line); }
+  .light small, .setting small, label.rule small { color: var(--dim); }
+  label.rule { display: grid; grid-template-columns: auto 1fr; gap: 2px 10px; padding: 7px 0; border-bottom: 1px solid var(--line); cursor: pointer; }
+  label.rule input { grid-row: span 2; margin-top: 3px; }
+  input[type=checkbox] { accent-color: var(--on); }
+  .row { display: flex; gap: 8px; align-items: center; }
+  .row input[type=range] { flex: 1; }
+  .value { min-width: 64px; text-align: right; font-variant-numeric: tabular-nums; }
+  .setting { display: grid; grid-template-columns: 1fr 120px 70px; gap: 8px; align-items: center; padding: 3px 0; }
+  .setting.changed .value { color: #ffcf5a; }
+  button { background: var(--panel); color: var(--text); border: 1px solid var(--line); border-radius: 4px; padding: 3px 10px; cursor: pointer; font: inherit; font-size: 12px; }
+  button:hover { border-color: var(--dim); }
+  #logbar { display: flex; gap: 8px; align-items: center; margin-bottom: 6px; }
+  #logbar input[type=search] { flex: 1; background: var(--panel); color: var(--text); border: 1px solid var(--line); border-radius: 4px; padding: 4px 8px; }
+  #log { height: 560px; overflow-y: auto; margin: 0; font: 12px/1.45 ui-monospace, monospace; white-space: pre-wrap; word-break: break-word; }
+  #log .W { color: #e0b050; } #log .E { color: #e06060; } #log .I { color: #fff; } #log .D { color: #8ab; }
+  .legend { display: flex; gap: 12px; flex-wrap: wrap; }
+  .legend span::before { content: ""; display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 4px; vertical-align: -1px; background: var(--c); }
+</style>
+</head>
+<body>
+<header>
+  <div id="swatch"></div>
+  <div>
+    <div id="song">Nothing playing</div>
+    <div id="artists"></div>
+    <div id="readout">–</div>
+    <div id="next"></div>
+  </div>
+  <div>
+    <div id="mode">–</div>
+    <div id="status">connecting…</div>
+  </div>
+</header>
+
+<section class="timeline">
+  <canvas id="overview"></canvas>
+  <canvas id="live"></canvas>
+  <div class="timeline-bar">
+    <div id="hover"></div>
+    <div class="legend">
+      <span style="--c: var(--drop)">drop / strobe</span>
+      <span style="--c: rgba(220,220,220,.6)">quiet</span>
+      <span style="--c: #2f6d8f">flow</span>
+      <span style="--c: var(--silence)">silence</span>
+    </div>
+    <label class="row">window <input id="zoom" type="range" min="5" max="60" step="1" value="20"> <span id="zoomval">20 s</span></label>
+  </div>
+</section>
+
+<div class="grid">
+  <div>
+    <h2>Lights <span class="spacer"></span><button id="lights-all">All</button><button id="lights-none">None</button></h2>
+    <div id="lights"></div>
+
+    <h2>Output</h2>
+    <div class="row">Max brightness <input id="max" type="range" min="5" max="100" step="5"><span id="maxval" class="value"></span></div>
+    <div class="row">Sync offset <input id="sync" type="range" min="-300" max="300" step="5"><span id="syncval" class="value"></span></div>
+
+    <h2>Rules <span class="spacer"></span><button id="rules-on">All on</button><button id="rules-off">All off</button></h2>
+    <div id="rules"></div>
+  </div>
+  <div>
+    <h2>Settings <span class="spacer"></span><button id="reanalyse" title="Run the current song's analysis again so detection settings apply to it">Re-analyse song</button><button id="reset">Reset</button></h2>
+    <small style="color: var(--dim)">Settings marked ♪ change how the song is analysed: they apply from the next song, or now with Re-analyse song. The rest apply immediately.</small>
+    <div id="settings"></div>
+  </div>
+  <div>
+    <h2>Log</h2>
+    <div id="logbar">
+      <input id="filter" type="search" placeholder="Filter log">
+      <label><input id="follow" type="checkbox" checked> follow</label>
+    </div>
+    <pre id="log"></pre>
+  </div>
+</div>
+
+<script>
+const $ = id => document.getElementById(id);
+const MAX_LOG_LINES = 2000;
+// The playhead sits this far across the live timeline; the rest shows what is coming.
+const NOW_AT = 0.25;
+// Lowest loudness the envelope draws; Spotify reports digital silence as -60 dB.
+const FLOOR_DB = -48;
+// Seconds of light output kept for the trace under the timeline.
+const TRACE_SECONDS = 120;
+const ENERGY_NAMES = ['very calm', 'calm', 'medium', 'energetic', 'peak'];
+
+let socket, timeline = null, state = null, windowSeconds = 20, hoverTime = null;
+const clock = {song: 0, at: 0, playing: false};
+const trace = [];
+
+function send(message) { socket.send(JSON.stringify(message)); }
+
+function songNow() { return clock.playing ? clock.song + (performance.now() - clock.at) / 1000 : clock.song; }
+
+// Binary search: index of the last item whose start is <= t.
+function lastAtOrBefore(items, t, start = item => item) {
+  let low = 0, high = items.length - 1, found = -1;
+  while (low <= high) {
+    const mid = (low + high) >> 1;
+    if (start(items[mid]) <= t) { found = mid; low = mid + 1; } else high = mid - 1;
+  }
+  return found;
+}
+
+function energyColor(energy, alpha = 1) { return `hsla(${240 - 240 * energy} 65% ${22 + 14 * energy}% / ${alpha})`; }
+function lightColor(h, s, b) { const dim = b > 0 ? Math.log1p(b) / Math.log1p(100) : 0; return `hsl(${h} ${s}% ${50 * dim}%)`; }
+function seconds(t) { return `${Math.floor(t / 60)}:${(t % 60).toFixed(1).padStart(4, '0')}`; }
+
+// ---- Log ----
+function addLog(line) {
+  const span = document.createElement('span');
+  span.className = (line.split(' | ')[1] || '').trim();
+  span.textContent = line + '\n';
+  const filter = $('filter').value.toLowerCase();
+  span.hidden = Boolean(filter) && !line.toLowerCase().includes(filter);
+  const log = $('log');
+  log.append(span);
+  while (log.childElementCount > MAX_LOG_LINES) log.firstChild.remove();
+  if ($('follow').checked) log.scrollTop = log.scrollHeight;
+}
+
+// ---- Panels ----
+function renderRules(rules) {
+  $('rules').replaceChildren(...rules.map(({name, description}) => {
+    const label = document.createElement('label');
+    label.className = 'rule';
+    label.innerHTML = `<input type="checkbox" data-rule="${name}"><span>${name.replaceAll('_', ' ')}</span><small>${description}</small>`;
+    label.querySelector('input').addEventListener('change', event => send({type: 'rule', name, on: event.target.checked}));
+    return label;
+  }));
+}
+
+function renderLights(lights) {
+  const container = $('lights');
+  const ips = lights.map(light => light.ip).join();
+  if (container.dataset.ips !== ips) {
+    container.dataset.ips = ips;
+    container.replaceChildren(...lights.map(light => {
+      const row = document.createElement('div');
+      row.className = 'light';
+      row.innerHTML = `<input type="checkbox" data-ip="${light.ip}"><div><div>${light.name}</div><small>${light.kind} · ${light.ip} · <span data-latency="${light.ip}"></span></small></div><button>Identify</button>`;
+      row.querySelector('input').addEventListener('change', event => send({type: 'light', ip: light.ip, on: event.target.checked}));
+      row.querySelector('button').addEventListener('click', () => send({type: 'identify', ip: light.ip}));
+      return row;
+    }));
+    if (!lights.length) container.textContent = 'No lights connected';
+  }
+  for (const light of lights) {
+    container.querySelector(`[data-ip="${light.ip}"]`).checked = light.enabled;
+    container.querySelector(`[data-latency="${light.ip}"]`).textContent = `${light.latency_ms} ms`;
+  }
+}
+
+function formatSetting(value, unit) { return `${Number(value.toFixed(3))}${unit ? ' ' + unit : ''}`; }
+
+function renderSettings(settings) {
+  const groups = Map.groupBy(settings, setting => setting.group);
+  const nodes = [];
+  for (const [group, items] of groups) {
+    const heading = document.createElement('h3');
+    heading.textContent = group;
+    nodes.push(heading);
+    for (const setting of items) {
+      const row = document.createElement('label');
+      row.className = 'setting' + (setting.value !== setting.default ? ' changed' : '');
+      row.title = `${setting.name}, default ${formatSetting(setting.default, setting.unit)}`;
+      row.innerHTML = `<span>${setting.applies === 'song' ? '♪ ' : ''}${setting.label}</span><input type="range" min="${setting.min}" max="${setting.max}" step="${setting.step}" value="${setting.value}"><span class="value">${formatSetting(setting.value, setting.unit)}</span>`;
+      const input = row.querySelector('input');
+      input.addEventListener('input', () => { row.querySelector('.value').textContent = formatSetting(Number(input.value), setting.unit); });
+      input.addEventListener('change', () => send({type: 'setting', name: setting.name, value: Number(input.value)}));
+      nodes.push(row);
+    }
+  }
+  $('settings').replaceChildren(...nodes);
+}
+
+function renderState(message) {
+  state = message;
+  // Re-anchor the song clock gently so the timeline doesn't jitter with network timing; jumps snap.
+  const predicted = songNow();
+  const error = message.song_time - predicted;
+  clock.song = !clock.playing || Math.abs(error) > 0.25 ? message.song_time : predicted + error * 0.1;
+  clock.at = performance.now();
+  clock.playing = message.playing;
+  if (message.playing) {
+    if (trace.length && message.song_time < trace[trace.length - 1].t - 0.5) trace.length = 0;
+    trace.push({t: message.song_time, h: message.hue, s: message.saturation, b: message.brightness});
+    while (trace.length && trace[0].t < message.song_time - TRACE_SECONDS) trace.shift();
+  }
+
+  $('swatch').style.background = lightColor(message.hue, message.saturation, message.brightness);
+  $('song').textContent = message.playing ? message.song : 'Nothing playing';
+  $('artists').textContent = message.playing ? message.artists : '';
+  $('readout').textContent = `${seconds(message.song_time)} · hue ${message.hue} · sat ${message.saturation}% · brightness ${message.brightness}%`;
+  $('mode').textContent = message.playing ? (message.mode || '–') : 'stopped';
+  $('mode').className = message.mode;
+  renderLights(message.lights);
+  for (const input of document.querySelectorAll('[data-rule]')) input.checked = message.rules[input.dataset.rule];
+  if (document.activeElement !== $('max')) $('max').value = message.max_brightness;
+  $('maxval').textContent = `${message.max_brightness}%`;
+  if (document.activeElement !== $('sync')) $('sync').value = message.sync_offset_ms;
+  $('syncval').textContent = `${message.sync_offset_ms > 0 ? '+' : ''}${message.sync_offset_ms} ms`;
+}
+
+// ---- What is coming ----
+function nextEvents(now) {
+  const parts = [];
+  const phrase = timeline.phrases.find(p => p.start > now);
+  if (phrase) parts.push(`next phrase in ${(phrase.start - now).toFixed(1)} s (${ENERGY_NAMES[Math.round(phrase.energy * 4)]})`);
+  const drop = timeline.parts.find(p => p.drop && p.start > now);
+  if (drop) parts.push(`drop in ${(drop.start - now).toFixed(1)} s`);
+  const silence = timeline.silences.find(([start]) => start > now);
+  if (silence) parts.push(`silence in ${(silence[0] - now).toFixed(1)} s`);
+  return parts.join(' · ');
+}
+
+function describe(t) {
+  const bits = [seconds(t)];
+  const bar = lastAtOrBefore(timeline.bars, t);
+  if (bar >= 0) bits.push(`bar ${bar}`);
+  const phraseIndex = lastAtOrBefore(timeline.phrases, t, p => p.start);
+  if (phraseIndex >= 0) {
+    const phrase = timeline.phrases[phraseIndex];
+    bits.push(`phrase ${phraseIndex} energy ${phrase.energy.toFixed(2)} (${ENERGY_NAMES[Math.round(phrase.energy * 4)]})${phrase.short ? ', short: no colour of its own' : ''}`);
+  }
+  const partIndex = lastAtOrBefore(timeline.parts, t, p => p.start);
+  if (partIndex >= 0) {
+    const part = timeline.parts[partIndex];
+    bits.push(`part ${partIndex} energy ${part.energy.toFixed(2)}, ${part.drop ? 'DROP' : 'no drop'}: ${part.why}`);
+  }
+  const within = spans => spans.find(([start, end]) => start <= t && t < end);
+  const quiet = within(timeline.quiet);
+  if (quiet) bits.push(`quiet, ${Math.round(quiet[2] * 100)}% of the phrase mid level`);
+  if (within(timeline.flow)) bits.push('flow');
+  if (within(timeline.strobe)) bits.push('strobe');
+  if (within(timeline.silences)) bits.push('silence');
+  return bits.join(' · ');
+}
+
+// ---- Drawing ----
+function fit(canvas) {
+  const ratio = window.devicePixelRatio || 1;
+  const width = canvas.clientWidth, height = canvas.clientHeight;
+  if (canvas.width !== Math.round(width * ratio) || canvas.height !== Math.round(height * ratio)) {
+    canvas.width = Math.round(width * ratio);
+    canvas.height = Math.round(height * ratio);
+  }
+  const ctx = canvas.getContext('2d');
+  ctx.setTransform(ratio, 0, 0, ratio, 0, 0);
+  ctx.clearRect(0, 0, width, height);
+  return {ctx, width, height};
+}
+
+function spansIn(spans, t0, t1) { return spans.filter(([start, end]) => end > t0 && start < t1); }
+
+function amplitude(db) { return Math.max(0, Math.min(1, (db - FLOOR_DB) / -FLOOR_DB)); }
+
+function drawOverview(now, t0, t1) {
+  const {ctx, width, height} = fit($('overview'));
+  const x = t => t / timeline.duration * width;
+  for (const part of timeline.parts) {
+    ctx.fillStyle = energyColor(part.energy);
+    ctx.fillRect(x(part.start), 0, Math.max(1, x(part.end) - x(part.start) - 1), height);
+    if (part.drop) { ctx.fillStyle = getComputedStyle(document.body).getPropertyValue('--drop'); ctx.fillRect(x(part.start), 0, 3, height); }
+  }
+  ctx.fillStyle = 'rgba(255, 90, 79, .9)';
+  for (const [start, end] of timeline.silences) ctx.fillRect(x(start), height - 6, Math.max(2, x(end) - x(start)), 6);
+  ctx.strokeStyle = 'rgba(255,255,255,.6)';
+  ctx.strokeRect(x(Math.max(0, t0)) + .5, .5, x(t1) - x(Math.max(0, t0)), height - 1);
+  ctx.fillStyle = '#fff';
+  ctx.fillRect(x(now) - 1, 0, 2, height);
+}
+
+function drawLive(now, t0, t1) {
+  const {ctx, width, height} = fit($('live'));
+  const x = t => (t - t0) / (t1 - t0) * width;
+  const style = getComputedStyle(document.body);
+  const lanes = {
+    phrases: [0, 34], modes: [38, 56], wave: [60, 196], beats: [200, 222], lights: [226, height],
+  };
+  const lane = (name, label) => {
+    const [top, bottom] = lanes[name];
+    ctx.fillStyle = 'rgba(255,255,255,.03)';
+    ctx.fillRect(0, top, width, bottom - top);
+    ctx.fillStyle = style.getPropertyValue('--dim');
+    ctx.font = '10px system-ui';
+    ctx.fillText(label, 4, top + 11);
+  };
+
+  // Phrases, shaded by energy, with part boundaries and drops.
+  lane('phrases', '');
+  const [pTop, pBottom] = lanes.phrases;
+  for (const [index, phrase] of timeline.phrases.entries()) {
+    if (phrase.end < t0 || phrase.start > t1) continue;
+    ctx.fillStyle = energyColor(phrase.energy, phrase.short ? .5 : 1);
+    ctx.fillRect(x(phrase.start), pTop, x(phrase.end) - x(phrase.start) - 1, pBottom - pTop);
+    ctx.fillStyle = '#fff';
+    ctx.font = '11px system-ui';
+    const text = `phrase ${index} · ${phrase.energy.toFixed(2)} ${ENERGY_NAMES[Math.round(phrase.energy * 4)]}`;
+    ctx.fillText(text, Math.max(x(phrase.start), 0) + 4, pTop + 21);
+  }
+  for (const [index, part] of timeline.parts.entries()) {
+    if (part.start < t0 || part.start > t1) continue;
+    ctx.fillStyle = part.drop ? style.getPropertyValue('--drop') : 'rgba(255,255,255,.8)';
+    ctx.fillRect(x(part.start) - 1, pTop, part.drop ? 3 : 2, lanes.lights[1]);
+    ctx.font = 'bold 10px system-ui';
+    ctx.fillText(part.drop ? `DROP · part ${index}` : `part ${index}`, x(part.start) + 4, pTop + 32);
+  }
+
+  // Modes the controller will use.
+  lane('modes', 'mode');
+  const [mTop, mBottom] = lanes.modes;
+  for (const [start, end, level] of spansIn(timeline.quiet, t0, t1)) {
+    ctx.fillStyle = `rgba(220,220,220,${.15 + .5 * level})`;
+    ctx.fillRect(x(start), mTop, x(end) - x(start), mBottom - mTop);
+  }
+  ctx.fillStyle = '#2f6d8f';
+  for (const [start, end] of spansIn(timeline.flow, t0, t1)) ctx.fillRect(x(start), mTop, x(end) - x(start), mBottom - mTop);
+  for (const [start, end] of spansIn(timeline.strobe, t0, t1)) {
+    const gradient = ctx.createLinearGradient(x(start), 0, x(end), 0);
+    for (let step = 0; step <= 6; step++) gradient.addColorStop(step / 6, `hsl(${step * 60} 90% 55%)`);
+    ctx.fillStyle = gradient;
+    ctx.fillRect(x(start), mTop, x(end) - x(start), mBottom - mTop);
+  }
+  ctx.fillStyle = style.getPropertyValue('--silence');
+  for (const [start, end] of spansIn(timeline.silences, t0, t1)) ctx.fillRect(x(start), mTop, Math.max(2, x(end) - x(start)), mBottom - mTop);
+
+  // Loudness envelope from Spotify's segments: onset level, then the peak at its time, mirrored.
+  lane('wave', 'loudness');
+  const [wTop, wBottom] = lanes.wave;
+  const middle = (wTop + wBottom) / 2, half = (wBottom - wTop) / 2 - 2;
+  const segments = timeline.segments;
+  const first = Math.max(0, lastAtOrBefore(segments, t0, s => s[0]));
+  const points = [];
+  for (let index = first; index < segments.length && segments[index][0] <= t1; index++) {
+    const [start, duration, onsetDb, peakDb, peakTime] = segments[index];
+    points.push([start, amplitude(onsetDb)], [start + peakTime, amplitude(peakDb)]);
+    const next = segments[index + 1];
+    // The level decays toward the next onset.
+    points.push([next ? next[0] : start + duration, amplitude(next ? next[2] : onsetDb)]);
+  }
+  if (points.length) {
+    const path = new Path2D();
+    path.moveTo(x(points[0][0]), middle);
+    for (const [t, a] of points) path.lineTo(x(t), middle - a * half);
+    for (let index = points.length - 1; index >= 0; index--) path.lineTo(x(points[index][0]), middle + points[index][1] * half);
+    path.closePath();
+    ctx.fillStyle = '#35505c';
+    ctx.fill(path);
+    ctx.save();
+    ctx.beginPath(); ctx.rect(0, wTop, x(now), wBottom - wTop); ctx.clip();
+    ctx.fillStyle = '#7fb3c4';
+    ctx.fill(path);
+    ctx.restore();
+  }
+
+  // Beats and bars.
+  lane('beats', 'beats');
+  const [bTop, bBottom] = lanes.beats;
+  ctx.fillStyle = 'rgba(255,255,255,.45)';
+  for (let index = Math.max(0, lastAtOrBefore(timeline.beats, t0)); index < timeline.beats.length && timeline.beats[index] <= t1; index++) {
+    ctx.fillRect(x(timeline.beats[index]), bBottom - 8, 1, 8);
+  }
+  const barSpacing = timeline.bars.length > 1 ? (timeline.bars[1] - timeline.bars[0]) / (t1 - t0) * width : 0;
+  ctx.font = '10px system-ui';
+  for (let index = Math.max(0, lastAtOrBefore(timeline.bars, t0)); index < timeline.bars.length && timeline.bars[index] <= t1; index++) {
+    ctx.fillStyle = 'rgba(255,255,255,.9)';
+    ctx.fillRect(x(timeline.bars[index]), bTop + 2, 1, bBottom - bTop - 2);
+    if (barSpacing > 28) ctx.fillText(String(index), x(timeline.bars[index]) + 3, bTop + 11);
+  }
+
+  // What the lights did: brightness as height, coloured by the hue sent.
+  lane('lights', 'lights');
+  const [lTop, lBottom] = lanes.lights;
+  for (let index = 1; index < trace.length; index++) {
+    const previous = trace[index - 1], sample = trace[index];
+    if (sample.t < t0 || previous.t > t1 || sample.t - previous.t > 0.5) continue;
+    const top = lBottom - sample.b / 100 * (lBottom - lTop - 4);
+    ctx.fillStyle = lightColor(sample.h, sample.s, Math.max(sample.b, 30));
+    ctx.fillRect(x(previous.t), top, Math.max(1, x(sample.t) - x(previous.t)), lBottom - top);
+  }
+
+  // Fades reported by Spotify.
+  ctx.fillStyle = 'rgba(0,0,0,.35)';
+  if (timeline.fade_in_end > t0) ctx.fillRect(0, 0, x(timeline.fade_in_end), lanes.wave[1]);
+  if (timeline.fade_out_start < t1) ctx.fillRect(x(timeline.fade_out_start), 0, width, lanes.wave[1]);
+
+  // Playhead and hover.
+  ctx.fillStyle = '#fff';
+  ctx.fillRect(x(now) - 1, 0, 2, height);
+  if (hoverTime !== null) {
+    ctx.fillStyle = 'rgba(255,255,255,.35)';
+    ctx.fillRect(x(hoverTime), 0, 1, height);
+  }
+}
+
+function frame() {
+  requestAnimationFrame(frame);
+  if (!timeline) {
+    const {ctx, width, height} = fit($('live'));
+    fit($('overview'));
+    ctx.fillStyle = '#8a8a93';
+    ctx.font = '13px system-ui';
+    ctx.fillText('Waiting for a track…', width / 2 - 60, height / 2);
+    return;
+  }
+  const now = songNow();
+  const t0 = now - windowSeconds * NOW_AT, t1 = t0 + windowSeconds;
+  drawOverview(now, t0, t1);
+  drawLive(now, t0, t1);
+  const next = state && state.playing ? nextEvents(now) : '';
+  if ($('next').textContent !== next) $('next').textContent = next;
+  if (hoverTime !== null) $('hover').textContent = describe(hoverTime);
+}
+
+// ---- Socket ----
+function connect() {
+  socket = new WebSocket(`ws://${location.host}/ws`);
+  socket.onopen = () => { $('status').textContent = 'connected'; };
+  socket.onclose = () => { $('status').textContent = 'disconnected, retrying…'; setTimeout(connect, 1000); };
+  socket.onmessage = event => {
+    const message = JSON.parse(event.data);
+    if (message.type === 'hello') {
+      renderRules(message.rules);
+      renderSettings(message.settings);
+      $('log').replaceChildren();
+      message.log.forEach(addLog);
+    } else if (message.type === 'state') renderState(message);
+    else if (message.type === 'log') addLog(message.line);
+    else if (message.type === 'settings') renderSettings(message.settings);
+    else if (message.type === 'timeline') { timeline = message; trace.length = 0; }
+    else throw new Error(`Unknown message type ${message.type}`);
+  };
+}
+
+// ---- Controls ----
+$('max').addEventListener('input', event => { $('maxval').textContent = `${event.target.value}%`; send({type: 'max_brightness', value: Number(event.target.value)}); });
+$('sync').addEventListener('input', event => send({type: 'sync_offset', value: Number(event.target.value)}));
+$('rules-on').addEventListener('click', () => document.querySelectorAll('[data-rule]').forEach(input => send({type: 'rule', name: input.dataset.rule, on: true})));
+$('rules-off').addEventListener('click', () => document.querySelectorAll('[data-rule]').forEach(input => send({type: 'rule', name: input.dataset.rule, on: false})));
+$('lights-all').addEventListener('click', () => document.querySelectorAll('[data-ip]').forEach(input => send({type: 'light', ip: input.dataset.ip, on: true})));
+$('lights-none').addEventListener('click', () => document.querySelectorAll('[data-ip]').forEach(input => send({type: 'light', ip: input.dataset.ip, on: false})));
+$('reset').addEventListener('click', () => send({type: 'reset_settings'}));
+$('reanalyse').addEventListener('click', () => send({type: 'reanalyse'}));
+$('zoom').addEventListener('input', event => { windowSeconds = Number(event.target.value); $('zoomval').textContent = `${windowSeconds} s`; });
+$('filter').addEventListener('input', () => {
+  const filter = $('filter').value.toLowerCase();
+  for (const span of $('log').children) span.hidden = Boolean(filter) && !span.textContent.toLowerCase().includes(filter);
+});
+$('live').addEventListener('mousemove', event => {
+  if (!timeline) return;
+  const rect = event.target.getBoundingClientRect();
+  const now = songNow(), t0 = now - windowSeconds * NOW_AT;
+  hoverTime = t0 + (event.clientX - rect.left) / rect.width * windowSeconds;
+});
+$('live').addEventListener('mouseleave', () => { hoverTime = null; $('hover').textContent = ''; });
+connect();
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>

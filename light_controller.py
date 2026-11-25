@@ -100,8 +100,24 @@ HUE_FADE_BARS = 1
 SONG_LOG_DIR = "logs"
 SONG_LOG_LEVEL = "DEBUG"
 SONG_LOG_FORMAT = "{time:HH:mm:ss.SSS} | {level:1.1} | {message}"
+# The web app's identify button blinks a light this many times, this fast.
+IDENTIFY_BLINKS = 3
+IDENTIFY_BLINK_S = 0.3
 # Names of the five energy levels, matching ATMOSPHERIC_DB in atmospheric.py.
 ENERGY_NAMES = ("very calm", "calm", "medium", "energetic", "peak")
+# Mechanics that can be switched off at runtime (from the web app) to judge
+# each one by eye. All start on. RULES.md describes every rule in full.
+RULES = {
+    'colour_changes': "Each phrase crosses into a new palette colour over its last bar",
+    'strobe': "The first bar of every drop strobes a new colour every eighth note",
+    'flow': "Bars without transients drift slowly instead of pulsing",
+    'flow_hue_drift': "Flow bars step the hue one palette colour up the wheel per bar",
+    'quiet': "Breakdown bars hold one colour, dimmer the quieter they are",
+    'silence': "Near-silent gaps fall fast to a dim level; long ones go on to 0%",
+    'loudness_pulse': "Quieter segments pull each beat's peak down inside the band",
+    'slow_tempo_ramps': "Slow songs get longer pulse ramps so troughs don't flash",
+    'track_fade': "Brightness follows the track's fade in and fade out",
+}
 
 
 def bar_runs(bars) -> list[tuple[int, int]]:
@@ -158,6 +174,10 @@ class LightsController:
         self._section_timbres: list = []
         self._beat_starts: list = []
         self.current_song: str = ""
+        self.current_artists: str = ""
+        self.current_track_id: str = ""
+        self.timeline_id: int = 0                # bumped on every loaded track, so the web app resends the timeline
+        self.disabled_devices: set[str] = set()  # IPs switched off from the web app: sent nothing
         self._song_log: int | None = None        # loguru sink id of the current track's file
         self._tatum_starts: list = []
         self._fade_in_end: float = 0.0
@@ -178,6 +198,7 @@ class LightsController:
         self.sync_offset: float = 0.0    # extra seconds to fire commands early (+) or late (-)
         self.atmospheric_pulse_on: int | None = None
         self.atmospheric_pulse_off: int | None = None
+        self.rules: dict[str, bool] = {name: True for name in RULES}
 
         # Panel animation: interpolate displayed color over the transition duration
         self._trans_start_hue: float = float(self.current_hue)
@@ -192,7 +213,7 @@ class LightsController:
         self._color_trans_start_time: float = 0.0
         self._color_trans_duration: float = 0.0
         self._sent_color: tuple[int, int] | None = None   # last hue/sat sent to the devices
-        self._mode: str = ""                     # pulse, flow, quiet or strobe: logged when it changes
+        self.mode: str = ""                     # pulse, flow, quiet or strobe: logged when it changes
 
         self._current_params = {
             'hue': self.current_hue,
@@ -281,11 +302,13 @@ class LightsController:
         self._cancel_strobe_task()
         self._strobe_scheduled_for = -1
         self._flow_scheduled_for = -1
-        self._mode = ""
+        self.mode = ""
         self._silence_scheduled_for = -1
         self._beat_scheduled_for = -1
         self._tatum_starts =[t['start'] for t in self.analysis.get('tatums', []) if t.get('confidence', 1.0) >= conf]
         self.current_song = event.song_name
+        self.current_artists = event.artist_names
+        self.current_track_id = event.track_id
 
         track = self.analysis.get('track', {})
         logger.info(
@@ -342,6 +365,20 @@ class LightsController:
         self._pre_section_trans_for = -1
         self._last_progress = event.progress_time_ms
         self._last_progress_mono = time.monotonic()
+        self.timeline_id += 1
+
+    def reanalyse(self):
+        """Run the loaded track's analysis again from where it is playing,
+        so detection settings changed mid-song apply to it."""
+        logger.info("Re-analysing the current song with the changed settings")
+        self.handle_song_changed(EventSongChanged(
+            self.analysis, self.song_time(), song_name=self.current_song,
+            artist_names=self.current_artists, track_id=self.current_track_id,
+        ))
+
+    def song_time(self) -> float:
+        """Song position now, run on from the last progress tick."""
+        return self._last_progress + (time.monotonic() - self._last_progress_mono)
 
     def _split_phrases(self) -> list[dict]:
         """Cut each part into phrases of a fixed bar count from its first bar,
@@ -647,6 +684,8 @@ class LightsController:
         return max(0.0, min(1.0, raw))
 
     def _fade_multiplier(self, current_time: float) -> float:
+        if not self.rules['track_fade']:
+            return 1.0
         if self._fade_in_end > 0 and current_time < self._fade_in_end:
             return max(0.05, current_time / self._fade_in_end)
         if self._fade_out_start < float('inf') and current_time > self._fade_out_start:
@@ -744,7 +783,8 @@ class LightsController:
                 )
             lead_beat = max(0, bisect.bisect_left(self._beat_starts, fade_start) - 1)
             if (
-                important_boundary
+                self.rules['colour_changes']
+                and important_boundary
                 and target.get('confidence', 1.0) >= self.min_confidence
                 and min(self._beat_starts[lead_beat], fade_start) <= current_time < target_start
             ):
@@ -757,7 +797,8 @@ class LightsController:
             self._log_phrase_start(current_section_index, current_time)
             self.current_section_index = current_section_index
             if (
-                current_section_index in self.section_color_indexes
+                self.rules['colour_changes']
+                and current_section_index in self.section_color_indexes
                 and current_section_index not in self._short_sections
                 and section.get('confidence', 1.0) >= self.min_confidence
                 and self._pre_section_trans_for != current_section_index
@@ -776,7 +817,8 @@ class LightsController:
         # beats: the gap rarely starts on one.
         silence_index = bisect.bisect_right(self._silence_starts, current_time + SILENCE_LEAD_S) - 1
         if (
-            silence_index >= 0
+            self.rules['silence']
+            and silence_index >= 0
             and silence_index != self._silence_scheduled_for
             and self._silences[silence_index][1] > current_time
         ):
@@ -800,15 +842,15 @@ class LightsController:
             fire_in = next_beat['start'] - current_time
             previous_beat_start = self._beat_starts[next_beat_idx - 1] if next_beat_idx else 0.0
             # The first beat after a silence relights whatever mode it is in.
-            after_silence = self._silence_ended_in(previous_beat_start, next_beat['start'])
+            after_silence = self.rules['silence'] and self._silence_ended_in(previous_beat_start, next_beat['start'])
             if fire_in < 0.05:
                 # Beat is essentially "now" — skip it; this happens during Spotify catch-up
                 # bursts where song time jumps ahead rapidly and next beats appear stale.
                 self._beat_scheduled_for = next_beat_idx
-            elif self._silence_at(next_beat['start']):
+            elif self.rules['silence'] and self._silence_at(next_beat['start']):
                 # The blackout owns beats inside a silence.
                 self._beat_scheduled_for = next_beat_idx
-            elif self._beat_bar(next_beat_idx) in self._strobe_bars:
+            elif self.rules['strobe'] and self._beat_bar(next_beat_idx) in self._strobe_bars:
                 # The strobe owns its whole bar: one task steps the colour on
                 # every eighth note from this beat to the bar's end.
                 self._beat_scheduled_for = next_beat_idx
@@ -833,7 +875,7 @@ class LightsController:
                     self._strobe_task = asyncio.create_task(self._scheduled_strobe(
                         [(now + (start - current_time), length) for start, length in eighths], peak,
                     ))
-            elif self._beat_bar(next_beat_idx) in self._flow_bars:
+            elif self.rules['flow'] and self._beat_bar(next_beat_idx) in self._flow_bars:
                 # Flow bars have no transients to pulse on: one command per
                 # bar settles the brightness at the bar's loudness inside
                 # the section's band over the rest of the bar, and drifts
@@ -849,7 +891,7 @@ class LightsController:
                     bottom, top = band_for(energy_score)
                     rank = bisect.bisect_left(sorted(self._bar_loudness), self._bar_loudness[bar]) / max(len(self.bars) - 1, 1)
                     level = to_brightness((bottom + (top - bottom) * (0.5 + 0.5 * rank)) * fade)
-                    if self._color_at(deadline) != self._color_at(deadline + length):
+                    if not self.rules['flow_hue_drift'] or self._color_at(deadline) != self._color_at(deadline + length):
                         logger.trace(
                             "Bar {} flow: settle at {:.1f}% over {:.2f}s, the phrase colour crossing moves the hue",
                             bar, self._scale_brightness(level), length,
@@ -862,7 +904,7 @@ class LightsController:
                             bar, hue, saturation, self._scale_brightness(level), length,
                         )
                         self._start_beat_task(self._scheduled_drift(deadline, length, level, hue, saturation))
-            elif self._beat_bar(next_beat_idx) in self._quiet_bars:
+            elif self.rules['quiet'] and self._beat_bar(next_beat_idx) in self._quiet_bars:
                 # Quiet bars hold one level without pulsing: between dark and
                 # the phrase's mid level, by how far under the bars before
                 # they sit. The first beat of a quiet run settles there over
@@ -908,7 +950,7 @@ class LightsController:
                 # different levels, which read as flashes once the low end is
                 # visible. Floor the ramps at a share of the beat that grows as
                 # the tempo drops: nothing above ~133 BPM, half a beat at 60.
-                slow = max(0.0, min(1.0, (beat_len - 0.45) / 0.45))
+                slow = max(0.0, min(1.0, (beat_len - 0.45) / 0.45)) if self.rules['slow_tempo_ramps'] else 0.0
                 attack = max(attack, 0.5 * slow)
                 release = max(release, 0.5 * slow)
                 hold = min(hold, max(0.0, 1.0 - attack - release))
@@ -937,11 +979,11 @@ class LightsController:
                 # The section's band sets the swing; the pulse places this
                 # beat's peak inside it, pulled down on quieter segments.
                 bottom, top = band_for(energy_score)
-                strength = pulse * (0.5 + 0.5 * self._segment_loudness(self.segments[seg_idx]))
+                strength = pulse * (0.5 + 0.5 * self._segment_loudness(self.segments[seg_idx])) if self.rules['loudness_pulse'] else pulse
                 low = to_brightness(bottom * fade)
                 # A release landing after the blackout would relight the lamp.
                 upcoming = self._silence_starting_in(next_beat['start'], next_beat['start'] + beat_len)
-                if upcoming:
+                if self.rules['silence'] and upcoming:
                     start, end, _ = upcoming
                     low = 0.0 if end - start >= SILENCE_DARK_MIN_S else min(low, self._silence_dim_level(start))
                 high = to_brightness((bottom + (top - bottom) * strength) * fade)
@@ -1030,9 +1072,9 @@ class LightsController:
 
     def _enter_mode(self, mode: str, bar: int, why: str):
         """Log a switch between pulse, flow, quiet and strobe once, with its reason."""
-        if mode == self._mode:
+        if mode == self.mode:
             return
-        self._mode = mode
+        self.mode = mode
         logger.debug("Bar {} ({:.1f}s): {}, {}", bar, self.bars[bar]['start'], mode, why)
 
     def _log_phrase_start(self, index: int, current_time: float):
@@ -1101,7 +1143,7 @@ class LightsController:
         self._cancel_strobe_task()
         self._strobe_scheduled_for = -1
         self._flow_scheduled_for = -1
-        self._mode = ""
+        self.mode = ""
         self._silence_scheduled_for = -1
         self._beat_scheduled_for = -1
         self._pre_section_trans_for = -1
@@ -1226,7 +1268,7 @@ class LightsController:
                     cmd_hue, cmd_sat, new_brightness, duration=duration,
                     dispatch_at=(deadline - device.estimated_latency - self.sync_offset) if deadline is not None else None,
                 )
-                for device in self.devices
+                for device in self.devices if device.ip not in self.disabled_devices
             ))
         elif brightness is not None:
             await asyncio.gather(*(
@@ -1234,9 +1276,65 @@ class LightsController:
                     new_brightness, duration=duration,
                     dispatch_at=(deadline - device.estimated_latency - self.sync_offset) if deadline is not None else None,
                 )
-                for device in self.devices
+                for device in self.devices if device.ip not in self.disabled_devices
             ))
         await asyncio.sleep(0)
+
+    async def identify(self, ip: str):
+        """Blink one light white so it can be found in the room."""
+        device = next(device for device in self.devices if device.ip == ip)
+        logger.info("Identifying light {} ({})", ip, device.model)
+        for _ in range(IDENTIFY_BLINKS):
+            await device.set_hsv(0, 0, 100, duration=0.05)
+            await asyncio.sleep(IDENTIFY_BLINK_S)
+            # 1%, not 0: Yeelight rejects a brightness of 0.
+            await device.set_hsv(0, 0, 1, duration=0.05)
+            await asyncio.sleep(IDENTIFY_BLINK_S)
+        # The lamp is white now; the next command has to carry the colour.
+        self._sent_color = None
+
+    def set_device_enabled(self, ip: str, enabled: bool):
+        if enabled:
+            self.disabled_devices.discard(ip)
+            # The lamp missed the colours sent while it was off; the next
+            # command has to carry the colour, not just brightness.
+            self._sent_color = None
+        else:
+            self.disabled_devices.add(ip)
+        logger.info("Light {} switched {} from the web app", ip, "on" if enabled else "off")
+
+    def timeline(self) -> dict:
+        """Everything the web app draws for the loaded track, in song seconds."""
+        def bar_span(bar: int) -> tuple[float, float]:
+            return self.bars[bar]['start'], self.bars[bar]['start'] + self.bars[bar]['duration']
+
+        return {
+            'duration': self._track_duration,
+            'beats': self._beat_starts,
+            'bars': [bar['start'] for bar in self.bars],
+            'parts': [
+                {'start': part['start'], 'end': part['start'] + part['duration'], 'energy': energy,
+                 'drop': part['drop'], 'why': part['drop_why']}
+                for part, energy in zip(self._parts, self._part_energies)
+            ],
+            'phrases': [
+                {'start': section['start'], 'end': section['start'] + section['duration'],
+                 'energy': energy, 'short': index in self._short_sections}
+                for index, (section, energy) in enumerate(zip(self.sections, self._section_energies))
+            ],
+            'quiet': [[*bar_span(bar), level] for bar, level in sorted(self._quiet_bars.items())],
+            'flow': [list(bar_span(bar)) for bar in sorted(self._flow_bars)],
+            'strobe': [list(bar_span(bar)) for bar in sorted(self._strobe_bars)],
+            'silences': [[start, end] for start, end, _ in self._silences],
+            # Spotify gives no audio, only per-segment loudness: onset, peak
+            # and when the peak lands. The page draws its envelope.
+            'segments': [
+                [s['start'], s['duration'], s['loudness_start'], s['loudness_max'], s['loudness_max_time']]
+                for s in self.analysis['segments']
+            ],
+            'fade_in_end': self._fade_in_end,
+            'fade_out_start': min(self._fade_out_start, self._track_duration),
+        }
 
     def _color_at(self, at: float) -> tuple[int, int]:
         """Hue and saturation the colour crossing has reached at monotonic time `at`."""

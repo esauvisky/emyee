@@ -1,14 +1,7 @@
 #!/usr/bin/env python3
 import argparse
 import asyncio
-import colorsys
-import fcntl
-import math
 import os
-import sys
-import tty
-import termios
-import threading
 from dotenv import load_dotenv
 from loguru import logger
 from spotify_listener import SpotifyChangesListener
@@ -17,49 +10,10 @@ from device_manager import DeviceManager
 from light_device import DesiredState
 from utils import setup_logging
 from lan_reset import load_tokens
+from web_app import WebApp
 
-_PANEL_LINES = 5
 _EXIT_KELVIN = 2500
 _EXIT_BRIGHTNESS = 100
-_terminal_lock = threading.RLock()
-
-
-def _get_rows() -> int:
-    try:
-        return os.get_terminal_size().lines
-    except OSError:
-        return 24
-
-
-def _draw_panel(controller: LightsController, rows: int) -> None:
-    h, s, b = controller.panel_state()
-
-    dim = math.log1p(b) / math.log1p(100) if b > 0 else 0
-    r, g, bc = colorsys.hsv_to_rgb(h / 360, s / 100, 1.0)
-    ri, gi, bi = int(r * 255 * dim), int(g * 255 * dim), int(bc * 255 * dim)
-
-    sw = 34
-    swatch = f"\033[48;2;{ri};{gi};{bi}m" + " " * sw + "\033[0m"
-    filled = max(0, min(10, b // 10))
-    bar = "▓" * filled + "░" * (10 - filled)
-
-    keys = "  [↑↓] max brightness"
-    song = controller.current_song or "–"
-    status = f"  \033[1m► ATMOSPHERIC\033[0m  |  ♫ {song}   {bar}  {b}%  |  max:{controller.max_brightness}%"
-
-    top = rows - _PANEL_LINES + 1
-    out = (
-        "\0337"
-        + f"\033[{top};1H\033[2K ┌" + "─" * sw + "┐"
-        + f"\033[{top + 1};1H\033[2K │{swatch}│"
-        + f"\033[{top + 2};1H\033[2K └" + "─" * sw + "┘"
-        + f"\033[{top + 3};1H\033[2K" + keys
-        + f"\033[{top + 4};1H\033[2K" + status
-        + "\0338"
-    )
-    with _terminal_lock:
-        sys.stderr.write(out)
-        sys.stderr.flush()
 
 
 def main():
@@ -87,6 +41,10 @@ def main():
     parser.add_argument(
         "--no-lan-reset", action="store_true",
         help="Skip the LAN control off→on cycle before discovery",
+    )
+    parser.add_argument(
+        "--web", metavar="HOST:PORT", default="0.0.0.0:8080",
+        help="Where to serve the control web app (default: 0.0.0.0:8080)",
     )
     parser.add_argument(
         "--yeelight-discover", action="store_true",
@@ -135,10 +93,7 @@ def main():
     client_id = os.getenv('CLIENT_ID')
     client_secret = os.getenv('CLIENT_SECRET')
 
-    rows = _get_rows()
-    is_tty = sys.stdin.isatty() and sys.stderr.isatty()
     setup_logging("DEBUG")
-    old_settings = None
 
     tokens = {}
     if not args.no_lan_reset:
@@ -180,75 +135,25 @@ def main():
         f"sync offset: {args.sync_offset:+.0f}ms | poll: {args.poll_interval:.0f}ms"
     )
 
-    if is_tty:
-        # Reserve bottom 5 lines for the panel; move cursor to top of scroll region
-        sys.stderr.write(f"\033[1;{rows - _PANEL_LINES}r\033[1;1H")
-        sys.stderr.flush()
-
-        def _panel_sink(msg):
-            with _terminal_lock:
-                sys.stderr.write(str(msg))
-                sys.stderr.flush()
-                _draw_panel(light_controller, rows)
-
-        setup_logging("DEBUG", sink=_panel_sink)
-        _draw_panel(light_controller, rows)
+    # After setup_logging: it replaces every log sink, the web app's included.
+    web_app = WebApp(light_controller)
+    host, port = args.web.rsplit(":", 1)
 
     loop = asyncio.get_event_loop()
-
     for d in devices:
         d.start(loop)
 
-    if is_tty:
-        old_settings = termios.tcgetattr(sys.stdin.fileno())
-        tty.setcbreak(sys.stdin.fileno())
-        def _on_key():
-            ch = sys.stdin.read(1)
-            if ch == '\x1b':
-                fd = sys.stdin.fileno()
-                old_fl = fcntl.fcntl(fd, fcntl.F_GETFL)
-                fcntl.fcntl(fd, fcntl.F_SETFL, old_fl | os.O_NONBLOCK)
-                try:
-                    rest = sys.stdin.read(2)
-                except (BlockingIOError, IOError):
-                    rest = ''
-                finally:
-                    fcntl.fcntl(fd, fcntl.F_SETFL, old_fl)
-                if rest == '[A':  # up arrow
-                    light_controller.max_brightness = min(100, light_controller.max_brightness + 5)
-                    _draw_panel(light_controller, rows)
-                elif rest == '[B':  # down arrow
-                    light_controller.max_brightness = max(5, light_controller.max_brightness - 5)
-                    _draw_panel(light_controller, rows)
-
-        loop.add_reader(sys.stdin.fileno(), _on_key)
-
-    async def _periodic_redraw():
-        while True:
-            await asyncio.sleep(0.05)  # 20fps for smooth color animation
-            if is_tty:
-                _draw_panel(light_controller, rows)
-
     final_state = None
-
     try:
-        loop.run_until_complete(
-            asyncio.gather(
-                spotify_listener.listen(),
-                light_controller.control_lights(),
-                _periodic_redraw(),
-            )
-        )
+        loop.run_until_complete(asyncio.gather(
+            spotify_listener.listen(),
+            light_controller.control_lights(),
+            web_app.serve(host, int(port)),
+        ))
     except KeyboardInterrupt:
         logger.info("Stopping...")
         final_state = DesiredState(mode="ct", kelvin=_EXIT_KELVIN, brightness=_EXIT_BRIGHTNESS, duration=0.3)
     finally:
-        if is_tty:
-            loop.remove_reader(sys.stdin.fileno())
-            if old_settings is not None:
-                termios.tcsetattr(sys.stdin.fileno(), termios.TCSADRAIN, old_settings)
-            sys.stderr.write("\033[r\033[J")
-            sys.stderr.flush()
         results = loop.run_until_complete(
             asyncio.gather(*(d.stop(final_state) for d in devices), return_exceptions=True)
         )

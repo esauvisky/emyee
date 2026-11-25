@@ -63,7 +63,7 @@ def get_vibrant_color(current_hue):
     return random.choice(palette)
 
 
-def setup_logging(log_lvl="DEBUG", options={}, sink=None):
+def setup_logging(log_lvl="DEBUG", options={}):
     file = options.get("file", False)
     function = options.get("function", False)
     process = options.get("process", False)
@@ -79,7 +79,7 @@ def setup_logging(log_lvl="DEBUG", options={}, sink=None):
 
     logger.configure(
         handlers=[{
-            "sink": sink if sink is not None else sys.stderr,
+            "sink": sys.stderr,
             "level": log_lvl,
             "format": log_fmt,
             "colorize": True,
