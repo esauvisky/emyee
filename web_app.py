@@ -14,6 +14,7 @@ import atmospheric
 import light_controller
 import sections
 from light_controller import ANALYSIS_RULES, RULES, LightsController
+from spotify_listener import SpotifyChangesListener
 
 STATIC_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "web")
 LIGHT_KINDS = {"LightDevice": "Yeelight", "ESPHomeDevice": "ESPHome", "TasmotaDevice": "Tasmota"}
@@ -56,8 +57,9 @@ SETTING_DEFAULTS = {name: getattr(module, name) for _, module, name, *_ in SETTI
 
 
 class WebApp:
-    def __init__(self, controller: LightsController):
+    def __init__(self, controller: LightsController, listener: SpotifyChangesListener):
         self.controller = controller
+        self.listener = listener
         self.log_lines: deque[str] = deque(maxlen=LOG_BACKLOG)
         self.sockets: set[web.WebSocketResponse] = set()
         self.loop = asyncio.get_event_loop()
@@ -148,6 +150,8 @@ class WebApp:
                 setattr(SETTING_MODULES[name], name, default)
             logger.info("Settings reset to their defaults from the web app")
             await self._send_settings()
+        elif kind == "seek":
+            await self.listener.seek(float(command["position"]))
         elif kind == "reanalyse":
             self.controller.reanalyse()
         else:
@@ -172,7 +176,12 @@ class WebApp:
         try:
             async for message in socket:
                 if message.type == WSMsgType.TEXT:
-                    await self._handle(json.loads(message.data))
+                    # Logged so the failure shows in the page's log, then raised.
+                    try:
+                        await self._handle(json.loads(message.data))
+                    except Exception:
+                        logger.exception("Web app command failed: {}", message.data)
+                        raise
         finally:
             self.sockets.discard(socket)
         return socket

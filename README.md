@@ -60,7 +60,7 @@ The application will discover and initialize the Yeelight bulbs on your network,
 `python main.py` serves the control page on http://0.0.0.0:8080/ (change with `--web HOST:PORT`); there is no terminal panel. The page shows:
 
 - the live colour, song, current mode and what comes next (phrase, drop, silence);
-- a whole-song overview and a scrolling timeline of phrases (shaded by energy), parts and drops, the quiet, flow, strobe and silence bars, Spotify's loudness envelope (Spotify gives no audio, so this stands in for a waveform), beats and bars, and a trace of what the lights actually did. Hover the timeline to see why each decision was made;
+- a whole-song overview and a scrolling timeline of phrases (shaded by energy), parts and drops, the quiet, flow, strobe and silence bars, Spotify's loudness envelope (Spotify gives no audio, so this stands in for a waveform), beats and bars, and a trace of what the lights actually did. Hover the timeline to see why each decision was made. Click the overview to jump to a part, click or drag the timeline to seek (clicking its top lane jumps to that phrase), or use the previous/next part and phrase buttons. Seeking moves Spotify's playback, which needs Spotify Premium and the `user-modify-playback-state` permission: the first start after this change asks you to log in to Spotify again;
 - light selection with an identify blink, max brightness and sync offset;
 - switches for each lighting rule, numeric settings for the rules with Reset and Re-analyse song, and the live log.
 

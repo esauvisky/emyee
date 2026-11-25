@@ -136,7 +136,7 @@ def main():
     )
 
     # After setup_logging: it replaces every log sink, the web app's included.
-    web_app = WebApp(light_controller)
+    web_app = WebApp(light_controller, spotify_listener)
     host, port = args.web.rsplit(":", 1)
 
     loop = asyncio.get_event_loop()

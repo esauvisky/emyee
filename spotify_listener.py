@@ -8,7 +8,7 @@ from spotipy import exceptions as spotipy_exceptions
 from models import EventSongChanged, EventAdjustProgressTime, EventStop
 from loguru import logger
 
-from utils import API_REQUEST_INTERVAL, API_AUDIO_ANALYSIS, API_CURRENT_PLAYING, SPOTIFY_SCOPE
+from utils import API_REQUEST_INTERVAL, API_AUDIO_ANALYSIS, API_CURRENT_PLAYING, API_SEEK, SPOTIFY_SCOPE
 from utils import SPOTIFY_CHANGES_LISTENER_DELAY, SPOTIFY_CHANGES_LISTENER_FAILURE_DELAY, SPOTIFY_REDIRECT_URI, SEEK_THRESHOLD
 
 
@@ -35,6 +35,22 @@ class SpotifyChangesListener:
             redirect_uri=SPOTIFY_REDIRECT_URI,
             scope=SPOTIFY_SCOPE,
         )
+
+    async def seek(self, position: float):
+        """Jump Spotify's playback to `position` seconds, and the progress
+        clock with it, so the lights follow without waiting for the next poll."""
+        async with aiohttp.ClientSession(headers=self.headers) as session:
+            async with session.put(API_SEEK, params={"position_ms": str(round(position * 1000))}) as response:
+                response.raise_for_status()
+        now_mono = time.monotonic()
+        self._progress_anchor_value = position
+        self._progress_anchor_mono = now_mono
+        self._progress_correction = 0.0
+        self._progress_correction_target = 0.0
+        self._progress_last_emit_mono = now_mono
+        self.last_progress = position
+        self.current_progress = position
+        logger.info("Seek to {:.2f}s from the web app", position)
 
     async def listen(self):
         # Run Spotify polling and progress updates together to avoid orphaned tasks.

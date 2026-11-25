@@ -12,6 +12,7 @@ MIN_SEGMENT_DURATION = 0.1
 MIN_ANALYSIS_CONFIDENCE = 0.0
 API_CURRENT_PLAYING = 'https://api.spotify.com/v1/me/player/currently-playing'
 API_AUDIO_ANALYSIS = 'https://api.spotify.com/v1/audio-analysis/'
+API_SEEK = 'https://api.spotify.com/v1/me/player/seek'
 SPOTIFY_CHANGES_LISTENER_DELAY = 0.02
 SPOTIFY_CHANGES_LISTENER_FAILURE_DELAY = 1
 # Progress off from the running clock by more than this is a seek, not drift.
@@ -27,7 +28,8 @@ if not SPOTIFY_REDIRECT_URI:
         SPOTIFY_REDIRECT_URI = f"http://{SPOTIFY_REDIRECT_HOST}:{SPOTIFY_REDIRECT_PORT}/"
     else:
         SPOTIFY_REDIRECT_URI = "http://127.0.0.1:8022/"
-SPOTIFY_SCOPE = 'user-read-currently-playing,user-read-playback-state'
+# user-modify-playback-state lets the web app seek; Spotify only allows it on Premium.
+SPOTIFY_SCOPE = 'user-read-currently-playing,user-read-playback-state,user-modify-playback-state'
 API_REQUEST_INTERVAL = 1
 COLORS = [(255, 102, 129), (204, 0, 203), (232, 62, 62), (102, 0, 102), (0, 0, 204), (59, 0, 104), (0, 0, 102),
           (0, 203, 204), (76, 126, 128), (0, 102, 102), (102, 102, 0), (204, 0, 0), (102, 0, 0), (203, 204, 0),

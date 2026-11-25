@@ -17,8 +17,10 @@
   #status { color: var(--dim); font-size: 12px; text-align: right; }
   section.timeline { padding: 8px 16px 4px; border-bottom: 1px solid var(--line); }
   canvas { display: block; width: 100%; }
-  #overview { height: 34px; cursor: default; }
-  #live { height: 300px; margin-top: 6px; }
+  #overview { height: 34px; cursor: pointer; }
+  #live { height: 300px; margin-top: 6px; cursor: grab; touch-action: none; }
+  #live.dragging { cursor: grabbing; }
+  .jump { display: flex; gap: 4px; }
   .timeline-bar { display: flex; gap: 16px; align-items: center; color: var(--dim); font-size: 12px; padding: 6px 0; }
   #hover { flex: 1; font-variant-numeric: tabular-nums; color: var(--text); min-height: 1.4em; }
   .grid { display: grid; grid-template-columns: minmax(280px, 1fr) minmax(280px, 1fr) minmax(360px, 1.6fr); gap: 0; }
@@ -66,6 +68,10 @@
   <canvas id="overview"></canvas>
   <canvas id="live"></canvas>
   <div class="timeline-bar">
+    <div class="jump" title="Jump through the song (click the overview to jump to a part, click or drag the timeline to seek)">
+      <button data-jump="part" data-step="-1">◀ part</button><button data-jump="phrase" data-step="-1">◀ phrase</button>
+      <button data-jump="phrase" data-step="1">phrase ▶</button><button data-jump="part" data-step="1">part ▶</button>
+    </div>
     <div id="hover"></div>
     <div class="legend">
       <span style="--c: var(--drop)">drop / strobe</span>
@@ -116,12 +122,26 @@ const TRACE_SECONDS = 120;
 const ENERGY_NAMES = ['very calm', 'calm', 'medium', 'energetic', 'peak'];
 
 let socket, timeline = null, state = null, windowSeconds = 20, hoverTime = null;
+// While dragging a timeline: the song time shown at the playhead, and where the drag began.
+let scrub = null;
+// A press that moves less than this many pixels is a click, not a drag.
+const CLICK_PX = 4;
 const clock = {song: 0, at: 0, playing: false};
 const trace = [];
 
 function send(message) { socket.send(JSON.stringify(message)); }
 
 function songNow() { return clock.playing ? clock.song + (performance.now() - clock.at) / 1000 : clock.song; }
+// The time the timeline is drawn around: the song, or the drag in progress.
+function viewNow() { return scrub === null ? songNow() : scrub.time; }
+
+function seek(position) {
+  const target = Math.max(0, Math.min(timeline.duration - 0.5, position));
+  send({type: 'seek', position: target});
+  // Move the drawn clock now; the server's next state confirms it.
+  clock.song = target;
+  clock.at = performance.now();
+}
 
 // Binary search: index of the last item whose start is <= t.
 function lastAtOrBefore(items, t, start = item => item) {
@@ -435,11 +455,11 @@ function frame() {
     ctx.fillText('Waiting for a track…', width / 2 - 60, height / 2);
     return;
   }
-  const now = songNow();
+  const now = viewNow();
   const t0 = now - windowSeconds * NOW_AT, t1 = t0 + windowSeconds;
   drawOverview(now, t0, t1);
   drawLive(now, t0, t1);
-  const next = state && state.playing ? nextEvents(now) : '';
+  const next = state && state.playing ? nextEvents(songNow()) : '';
   if ($('next').textContent !== next) $('next').textContent = next;
   if (hoverTime !== null) $('hover').textContent = describe(hoverTime);
 }
@@ -481,10 +501,77 @@ $('filter').addEventListener('input', () => {
 $('live').addEventListener('mousemove', event => {
   if (!timeline) return;
   const rect = event.target.getBoundingClientRect();
-  const now = songNow(), t0 = now - windowSeconds * NOW_AT;
-  hoverTime = t0 + (event.clientX - rect.left) / rect.width * windowSeconds;
+  hoverTime = viewNow() - windowSeconds * NOW_AT + (event.clientX - rect.left) / rect.width * windowSeconds;
 });
 $('live').addEventListener('mouseleave', () => { hoverTime = null; $('hover').textContent = ''; });
+// ---- Seeking ----
+// Live timeline: drag to scrub (the song jumps to the time under the playhead
+// on release), click the phrase lane to jump to that phrase's start, click
+// anywhere else to jump to that exact time.
+$('live').addEventListener('pointerdown', event => {
+  if (!timeline) return;
+  event.target.setPointerCapture(event.pointerId);
+  scrub = {time: songNow(), from: songNow(), x: event.clientX, moved: false};
+  event.target.classList.add('dragging');
+});
+$('live').addEventListener('pointermove', event => {
+  if (scrub === null) return;
+  const rect = event.target.getBoundingClientRect();
+  const dx = event.clientX - scrub.x;
+  if (Math.abs(dx) >= CLICK_PX) scrub.moved = true;
+  scrub.time = Math.max(0, Math.min(timeline.duration, scrub.from - dx / rect.width * windowSeconds));
+});
+$('live').addEventListener('pointerup', event => {
+  if (scrub === null) return;
+  const rect = event.target.getBoundingClientRect();
+  const done = scrub;
+  scrub = null;
+  event.target.classList.remove('dragging');
+  if (done.moved) { seek(done.time); return; }
+  const t = done.from - windowSeconds * NOW_AT + (event.clientX - rect.left) / rect.width * windowSeconds;
+  // The top lane (phrases and parts) jumps to the start of what was clicked.
+  if (event.clientY - rect.top <= 34) {
+    const index = lastAtOrBefore(timeline.phrases, t, phrase => phrase.start);
+    seek(index >= 0 ? timeline.phrases[index].start : 0);
+  } else seek(t);
+});
+// Overview: click jumps to the start of the part under the cursor, drag scrubs.
+$('overview').addEventListener('pointerdown', event => {
+  if (!timeline) return;
+  event.target.setPointerCapture(event.pointerId);
+  const rect = event.target.getBoundingClientRect();
+  const time = (event.clientX - rect.left) / rect.width * timeline.duration;
+  scrub = {time, from: time, x: event.clientX, moved: false};
+});
+$('overview').addEventListener('pointermove', event => {
+  if (scrub === null) return;
+  const rect = event.target.getBoundingClientRect();
+  if (Math.abs(event.clientX - scrub.x) >= CLICK_PX) scrub.moved = true;
+  scrub.time = Math.max(0, Math.min(timeline.duration, (event.clientX - rect.left) / rect.width * timeline.duration));
+});
+$('overview').addEventListener('pointerup', () => {
+  if (scrub === null) return;
+  const done = scrub;
+  scrub = null;
+  if (done.moved) { seek(done.time); return; }
+  const index = lastAtOrBefore(timeline.parts, done.time, part => part.start);
+  seek(index >= 0 ? timeline.parts[index].start : 0);
+});
+// Previous/next part or phrase. Going back from just after a start (under
+// BACK_GRACE_S) skips to the one before, like a music player's previous button.
+const BACK_GRACE_S = 1.5;
+for (const button of document.querySelectorAll('[data-jump]')) {
+  button.addEventListener('click', () => {
+    if (!timeline) return;
+    const items = timeline[button.dataset.jump + 's'];
+    const now = songNow();
+    const target = Number(button.dataset.step) > 0
+      ? items.find(item => item.start > now + 0.05)
+      : items.findLast(item => item.start < now - BACK_GRACE_S);
+    if (target) seek(target.start);
+  });
+}
+
 connect();
 requestAnimationFrame(frame);
 </script>
