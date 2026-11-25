@@ -22,7 +22,10 @@ import numpy as np
 
 from atmospheric import VISIBLE_MIN, band_for, profile_for, pulses_for, to_brightness
 from light_device import BaseLightDevice
-from sections import DOWNBEAT_SPANS, detect_sections, downbeat_shares, downbeat_shift, shift_bars
+from sections import (
+    DOWNBEAT_SPANS, MIN_PART_BARS, bar_features, detect_sections, downbeat_shares, downbeat_shift, shift_bars,
+    texture_steps,
+)
 
 # A bar whose loudest hit is this many dB under the median loudest hit of the
 # QUIET_LOOKBACK_BARS before it is a breakdown: it holds one colour instead of
@@ -80,6 +83,13 @@ PHRASE_BARS_CALM = 4
 PHRASE_BARS_LOUD = 8
 PHRASE_LOUD_ENERGY = 0.5
 PHRASE_MIN_BARS = 2
+# A part that isn't a whole number of phrases has a lead-in or a tail. Its
+# phrases count back from its last bar instead of from its first when the
+# texture changes (loudness and timbre, bar to bar) at the phrase starts that
+# gives are at least PHRASE_GRID_MARGIN times those counting from the first
+# bar: then the lead-in is at the start, like a 4-bar build before three
+# 8-bar phrases.
+PHRASE_GRID_MARGIN = 1.25
 # A section shorter than this gets no colour of its own: no fade into it, and
 # the fade into the next full section starts on its first bar (the first bar
 # of a run of short sections) and spans it.
@@ -287,6 +297,11 @@ class LightsController:
             "(60%) blended with its onset-density rank (40%); a drop is a part whose first bars sound far "
             "closer to the track's loudest sound than the bars before it"
         )
+        # Too few bars to split (as in detect_sections): no phrase grid to choose.
+        self._texture_steps = (
+            texture_steps(bar_features(self.analysis, self.bars)) if len(self.bars) >= 2 * MIN_PART_BARS
+            else np.zeros(len(self.bars))
+        )
         self.sections = self._split_phrases()
         bar_starts = [bar['start'] for bar in self.bars]
         self._section_bar_starts = []
@@ -406,9 +421,10 @@ class LightsController:
                     per_bar, spread, shift + 1, shift, self.bars[0]['start'])
 
     def _split_phrases(self) -> list[dict]:
-        """Cut each part into phrases of a fixed bar count from its first bar,
-        so colour changes and energy follow the music's phrasing inside long
-        parts (an intro and the build after it no longer share one energy)."""
+        """Cut each part into phrases of a fixed bar count, counted from its
+        first bar or back from its last (_phrase_cuts), so colour changes and
+        energy follow the music's phrasing inside long parts (an intro and the
+        build after it no longer share one energy)."""
         bar_starts = [bar['start'] for bar in self.bars]
         segments = self.analysis.get('segments', [])
         segment_starts = [s.get('start', 0.0) for s in segments]
@@ -419,13 +435,11 @@ class LightsController:
             first, end = part_bars[index], part_bars[index + 1]
             energy = self._part_energies[index]
             length = PHRASE_BARS_LOUD if energy >= PHRASE_LOUD_ENERGY else PHRASE_BARS_CALM
-            cuts = list(range(first, end, length))
-            if len(cuts) > 1 and end - cuts[-1] < PHRASE_MIN_BARS:
-                cuts.pop()
+            cuts, grid = self._phrase_cuts(first, end, length)
             logger.debug(
-                "Part {:>2} at {:6.1f}s, {:>3} bars: energy {:.2f} ({} {}, so {}-bar phrases) | {}: {}",
+                "Part {:>2} at {:6.1f}s, {:>3} bars: energy {:.2f} ({} {}, so {}-bar phrases, {}) | {}: {}",
                 index, part['start'], end - first, energy,
-                '≥' if energy >= PHRASE_LOUD_ENERGY else '<', PHRASE_LOUD_ENERGY, length,
+                '≥' if energy >= PHRASE_LOUD_ENERGY else '<', PHRASE_LOUD_ENERGY, length, grid,
                 'DROP' if part['drop'] else 'no drop', part['drop_why'],
             )
             starts = [part['start']] + [bar_starts[bar] for bar in cuts[1:]]
@@ -440,6 +454,34 @@ class LightsController:
                 })
         assert abs(sum(phrase['duration'] for phrase in phrases) - duration) < 1e-6 or not duration
         return phrases
+
+    def _phrase_cuts(self, first: int, end: int, length: int) -> tuple[list[int], str]:
+        """Bars where the phrases of the part [first, end) start, and how the
+        grid was chosen. A phrase start closer than PHRASE_MIN_BARS to either
+        end of the part is dropped: that bit joins its neighbour."""
+        def grid(offset: int) -> list[int]:
+            return [
+                bar for bar in range(first + offset, end, length)
+                if first + PHRASE_MIN_BARS <= bar <= end - PHRASE_MIN_BARS
+            ]
+
+        from_first = grid(0)
+        lead = (end - first) % length
+        from_last = grid(lead)
+        # A whole number of phrases, or too short to hold one, has one grid.
+        if not lead or not from_first or len(from_last) != len(from_first):
+            return [first] + from_first, "counted from its first bar"
+        at_first = float(np.mean(self._texture_steps[from_first]))
+        at_last = float(np.mean(self._texture_steps[from_last]))
+        if at_last >= PHRASE_GRID_MARGIN * at_first:
+            return [first] + from_last, (
+                f"counted back from its last bar after a {lead}-bar lead-in: texture changes {at_last:.2f} at "
+                f"those starts vs {at_first:.2f} counting from its first bar (needs {PHRASE_GRID_MARGIN}x)"
+            )
+        return [first] + from_first, (
+            f"counted from its first bar: texture changes {at_first:.2f} vs {at_last:.2f} counting back from "
+            f"its last bar (that needs {PHRASE_GRID_MARGIN}x)"
+        )
 
     def _compute_section_energies(self):
         self._section_energies = self._energies_for(self.sections)

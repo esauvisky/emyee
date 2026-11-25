@@ -61,7 +61,13 @@ calm, medium, energetic, peak), which choose the pulse profile.
 Parts are cut into **phrases** counted from their first bar:
 `PHRASE_BARS_LOUD` (8) bars in parts with energy ≥ `PHRASE_LOUD_ENERGY`
 (0.5), `PHRASE_BARS_CALM` (4) in calmer ones. A leftover shorter than
-`PHRASE_MIN_BARS` (2) joins the phrase before it. A phrase is the unit for
+`PHRASE_MIN_BARS` (2) joins its neighbour. A part that isn't a whole number
+of phrases has a lead-in or a tail: its phrases count back from its last bar
+instead of its first when the texture changes (loudness and timbre, bar to
+bar; chords change on almost every bar in a loop) at the phrase starts that
+gives are at least `PHRASE_GRID_MARGIN` (1.25×) those counting from its first
+bar. Then the lead-in sits at the start, like a 4-bar build before three
+8-bar phrases. A phrase is the unit for
 energy, pulse profile and colour.
 
 ## 2. Brightness (`atmospheric.py`)

@@ -178,6 +178,12 @@ def part_starts(features: np.ndarray) -> list[int]:
     return cuts[::-1]
 
 
+def texture_steps(features: np.ndarray) -> np.ndarray:
+    """Per bar, how far its loudness and timbre moved from the bar before.
+    Chords are left out: in a chord loop they change on almost every bar."""
+    return np.r_[0.0, np.linalg.norm(np.diff(features[:, :13], axis=0), axis=1)]
+
+
 def snap_to_changes(features: np.ndarray, cuts: list[int]) -> list[int]:
     """Move each boundary to the bar with the biggest bar-to-bar change within
     SNAP_BARS of it. A boundary that would land under MIN_PART_BARS after the
