@@ -42,6 +42,8 @@ SETTINGS = [
     ("Flow", light_controller, "FLOW_MAX_ONSET_DB", "Onset rise under", "dB", 1, 20, 0.5, "song"),
     ("Flow", light_controller, "FLOW_MAX_BEAT_CONFIDENCE", "Beat confidence under", "", 0, 1, 0.05, "song"),
     ("Flow", light_controller, "FLOW_QUIET_DB", "Under the loud bars", "dB", 0, 30, 0.5, "song"),
+    ("Parts", sections, "BOUNDARY_PENALTY", "Cost of a boundary", "", 2, 30, 0.5, "song"),
+    ("Parts", sections, "SNAP_BARS", "Snap to the change within", "bars", 0, 3, 1, "song"),
     ("Drops", sections, "DROP_MAX_RATIO", "Peak distance shrinks to", "×", 0.1, 1, 0.05, "song"),
     ("Drops", sections, "DROP_MIN_FALL", "Peak distance falls by", "", 0, 5, 0.05, "song"),
     ("Drops", sections, "DROP_MAX_ARRIVAL", "Lands within", "", 0.5, 10, 0.1, "song"),

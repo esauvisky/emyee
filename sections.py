@@ -7,15 +7,14 @@ import numpy as np
 # A boundary has to cut this much squared error out of the piecewise-constant
 # fit below. In its units (3 dB of loudness, or the track's whole timbre
 # spread scaled by TIMBRE_WEIGHT) two 8-bar parts split once they sit about
-# 4.5 dB apart with the same timbre and chords, sooner when those move too.
-BOUNDARY_PENALTY = 9.0
-# Extra cost of a part whose length is not a multiple of PHRASE_GRID_BARS.
-# Fills and pickups sound like the part they lead into, so on sound alone a
-# boundary tends to land a bar early; this pulls it onto the phrase. It stays
-# under BOUNDARY_PENALTY so a real odd-length part (or a bar Spotify
-# miscounted) still wins.
-OFF_GRID_PENALTY = 6.0
-PHRASE_GRID_BARS = 4
+# 5 dB apart with the same timbre and chords, sooner when those move too.
+BOUNDARY_PENALTY = 11.0
+# The fit places a boundary where the parts' averages differ most, which can
+# sit a bar off the bar the sound actually jumps on; each boundary then moves
+# to the bar with the biggest bar-to-bar change within SNAP_BARS of it. Parts
+# don't follow a fixed 4-bar grid: Spotify's bars drift by a beat or two
+# mid-track, so a grid counted in its bars pulled boundaries off the change.
+SNAP_BARS = 1
 MIN_PART_BARS = 2
 LOUDNESS_UNIT_DB = 3.0
 TIMBRE_WEIGHT = 2.0
@@ -149,7 +148,8 @@ def shift_bars(bars: list[dict], beats: list[dict], shift: int) -> list[dict]:
 def part_starts(features: np.ndarray) -> list[int]:
     """Bar indexes where parts start (bar 0 excluded): the split of the track
     into runs of bars that minimises each run's spread around its own mean,
-    plus BOUNDARY_PENALTY per part and OFF_GRID_PENALTY per off-grid length.
+    plus BOUNDARY_PENALTY per part, each then snapped to the bar the sound
+    jumps on (snap_to_changes).
 
     Solved exactly by dynamic programming over the end bar of the last part,
     so a boundary sits on the bar the sound changes on instead of wherever a
@@ -166,9 +166,7 @@ def part_starts(features: np.ndarray) -> list[int]:
         lengths = end - starts
         total = sums[end] - sums[starts]
         spread = squares[end] - squares[starts] - (total ** 2).sum(axis=1) / lengths
-        # The last part ends where the track does, not on a phrase.
-        off_grid = OFF_GRID_PENALTY * ((lengths % PHRASE_GRID_BARS != 0) & (end < count))
-        cost = best[starts] + spread + BOUNDARY_PENALTY + off_grid
+        cost = best[starts] + spread + BOUNDARY_PENALTY
         choice = int(np.argmin(cost))
         best[end] = cost[choice]
         previous[end] = starts[choice]
@@ -178,6 +176,20 @@ def part_starts(features: np.ndarray) -> list[int]:
         end = int(previous[end])
         cuts.append(end)
     return cuts[::-1]
+
+
+def snap_to_changes(features: np.ndarray, cuts: list[int]) -> list[int]:
+    """Move each boundary to the bar with the biggest bar-to-bar change within
+    SNAP_BARS of it. A boundary that would land under MIN_PART_BARS after the
+    one before it is dropped."""
+    step = np.r_[0.0, np.linalg.norm(np.diff(features, axis=0), axis=1)]
+    snapped = []
+    for cut in cuts:
+        window = range(max(1, cut - SNAP_BARS), min(len(features) - 1, cut + SNAP_BARS) + 1)
+        bar = max(window, key=lambda index: step[index])
+        if not snapped or bar - snapped[-1] >= MIN_PART_BARS:
+            snapped.append(bar)
+    return snapped
 
 
 def peak_approaches(features: np.ndarray, cuts: list[int]) -> list[tuple[float, float]]:
@@ -219,7 +231,7 @@ def detect_sections(analysis: dict, bars: list[dict]) -> list[dict]:
     approaches = []
     if len(bars) >= 2 * MIN_PART_BARS:
         features = bar_features(analysis, bars)
-        cuts += part_starts(features)
+        cuts += snap_to_changes(features, part_starts(features))
         approaches = peak_approaches(features, cuts)
     boundaries = [0.0] + [bars[index]["start"] for index in cuts[1:]] + [duration]
     lengths = np.diff(cuts + [len(bars)])
@@ -243,10 +255,10 @@ def detect_sections(analysis: dict, bars: list[dict]) -> list[dict]:
 
 
 def _check():
-    # 8 quiet bars, a 4-bar build whose last bar is a fill halfway to the
-    # drop's sound, then 12 loud bars: the drop is bar 12, not the fill.
+    # 8 quiet bars, a 3-bar build, then 13 loud bars: the drop starts on bar
+    # 11, where the sound jumps, though it is off the 4-bar grid.
     def level(bar):
-        return -20 if bar < 8 else -12 if bar < 11 else -8 if bar == 11 else -5
+        return -20 if bar < 8 else -12 if bar < 11 else -5
 
     bars = [{"start": float(i), "duration": 1.0} for i in range(24)]
     segments = [
@@ -254,12 +266,16 @@ def _check():
         for i in range(48)
     ]
     sections = detect_sections({"track": {"duration": 24.0}, "segments": segments}, bars)
-    assert [section["start"] for section in sections] == [0.0, 8.0, 12.0], [section["start"] for section in sections]
+    assert [section["start"] for section in sections] == [0.0, 8.0, 11.0], [section["start"] for section in sections]
     assert sum(section["duration"] for section in sections) == 24.0
     assert sections[2]["drop"] and not sections[0]["drop"], [section["drop_why"] for section in sections]
     short = detect_sections({"track": {"duration": 3.0}, "segments": segments[:6]}, bars[:3])
     assert [section["start"] for section in short] == [0.0]
     assert not short[0]["drop"]
+    jump = np.array([[0.0]] * 11 + [[5.0]] * 13)
+    assert snap_to_changes(jump, [12]) == [11]
+    assert snap_to_changes(jump, [10]) == [11]
+    assert snap_to_changes(jump, [11, 12]) == [11]
     assert drop_verdict(3.3, 1.4, 8)[0]
     assert not drop_verdict(3.3, 1.4, 3)[0]
     assert not drop_verdict(12.8, 6.1, 8)[0]

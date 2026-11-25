@@ -28,11 +28,13 @@ changes peak on is taken as the real beat 1.
 The track is split into **parts**: runs of bars that are most uniform in
 loudness, timbre and harmony (pitch-class content). The split is an exact
 change-point fit over bars.
-- Each boundary costs `BOUNDARY_PENALTY` (9.0), so a boundary must cut that
-  much error out of the fit: two 8-bar parts split once they sit about 4.5 dB
+- Each boundary costs `BOUNDARY_PENALTY` (11.0), so a boundary must cut that
+  much error out of the fit: two 8-bar parts split once they sit about 5 dB
   apart with the same timbre and chords.
-- A part whose length is not a multiple of `PHRASE_GRID_BARS` (4) costs
-  `OFF_GRID_PENALTY` (6.0) extra, so fill bars stay with the part they end.
+- Each boundary then snaps to the bar with the biggest bar-to-bar change
+  within `SNAP_BARS` (1) of it, so a part starts on the bar the sound jumps
+  on. Parts don't follow a fixed 4-bar grid: Spotify's bars drift by a beat
+  or two mid-track, and a grid counted in them pulled boundaries a bar off.
 - Parts are at least `MIN_PART_BARS` (2) long.
 - Weights: loudness in units of `LOUDNESS_UNIT_DB` (3 dB), timbre scaled by
   `TIMBRE_WEIGHT` (2.0), chords by `CHROMA_WEIGHT` (3.0). Silence is clamped
