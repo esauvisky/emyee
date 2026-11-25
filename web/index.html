@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>emyee</title>
 <style>
-  :root { color-scheme: dark; --bg: #101012; --panel: #18181b; --line: #2a2a2f; --text: #e2e2e6; --dim: #8a8a93; --on: #4caf7a; --drop: #ff4fd8; --silence: #ff5a4f; }
+  :root { color-scheme: dark; --bg: #101012; --panel: #18181b; --line: #2a2a2f; --text: #e2e2e6; --dim: #8a8a93; --on: #4caf7a; --drop: #ff4fd8; --lead: #ffb347; --silence: #ff5a4f; }
   * { box-sizing: border-box; }
   body { margin: 0; background: var(--bg); color: var(--text); font: 14px/1.4 system-ui, sans-serif; }
   header { display: grid; grid-template-columns: 140px 1fr auto; gap: 16px; align-items: center; padding: 12px 16px; border-bottom: 1px solid var(--line); }
@@ -13,7 +13,7 @@
   #song { font-size: 18px; font-weight: 600; }
   #artists, #readout, #next { color: var(--dim); font-variant-numeric: tabular-nums; }
   #mode { font-size: 12px; text-transform: uppercase; letter-spacing: .08em; padding: 4px 10px; border-radius: 999px; border: 1px solid var(--line); }
-  #mode.strobe { border-color: var(--drop); color: var(--drop); } #mode.quiet { color: #ccc; } #mode.flow { color: #6cb6de; border-color: #2f6d8f; }
+  #mode.hit { border-color: var(--drop); color: var(--drop); } #mode.lead-in { border-color: var(--lead); color: var(--lead); } #mode.quiet { color: #ccc; } #mode.flow { color: #6cb6de; border-color: #2f6d8f; }
   #status { color: var(--dim); font-size: 12px; text-align: right; }
   section.timeline { padding: 8px 16px 4px; border-bottom: 1px solid var(--line); }
   canvas { display: block; width: 100%; }
@@ -39,6 +39,8 @@
   .value { min-width: 64px; text-align: right; font-variant-numeric: tabular-nums; }
   .setting { display: grid; grid-template-columns: 1fr 120px 70px; gap: 8px; align-items: center; padding: 3px 0; }
   .setting.changed .value { color: #ffcf5a; }
+  select { background: var(--panel); color: var(--text); border: 1px solid var(--line); border-radius: 4px; padding: 3px 6px; font: inherit; flex: 1; }
+  .effect-why { color: var(--dim); display: block; margin: 2px 0 8px; }
   button { background: var(--panel); color: var(--text); border: 1px solid var(--line); border-radius: 4px; padding: 3px 10px; cursor: pointer; font: inherit; font-size: 12px; }
   button:hover { border-color: var(--dim); }
   #logbar { display: flex; gap: 8px; align-items: center; margin-bottom: 6px; }
@@ -74,7 +76,8 @@
     </div>
     <div id="hover"></div>
     <div class="legend">
-      <span style="--c: var(--drop)">drop / strobe</span>
+      <span style="--c: var(--lead)">drop lead-in</span>
+      <span style="--c: var(--drop)">drop hit</span>
       <span style="--c: rgba(220,220,220,.6)">quiet</span>
       <span style="--c: #2f6d8f">flow</span>
       <span style="--c: var(--silence)">silence</span>
@@ -91,6 +94,10 @@
     <h2>Output</h2>
     <div class="row">Max brightness <input id="max" type="range" min="5" max="100" step="5"><span id="maxval" class="value"></span></div>
     <div class="row">Sync offset <input id="sync" type="range" min="-300" max="300" step="5"><span id="syncval" class="value"></span></div>
+
+    <h2>Drops</h2>
+    <label class="row">Lead-in <select id="drop-lead" data-stage="lead"></select></label><small class="effect-why" id="drop-lead-why"></small>
+    <label class="row">Hit <select id="drop-hit" data-stage="hit"></select></label><small class="effect-why" id="drop-hit-why"></small>
 
     <h2>Rules <span class="spacer"></span><button id="rules-on">All on</button><button id="rules-off">All off</button></h2>
     <div id="rules"></div>
@@ -181,6 +188,17 @@ function renderRules(rules) {
   }));
 }
 
+// Descriptions of each drop effect by stage, from the server's hello.
+let dropEffects = {lead: {}, hit: {}};
+
+function renderDropEffects(effects) {
+  for (const [stage, list] of Object.entries(effects)) {
+    dropEffects[stage] = Object.fromEntries(list.map(({name, description}) => [name, description]));
+    const select = $(`drop-${stage}`);
+    select.replaceChildren(...list.map(({name}) => new Option(name.replaceAll('_', ' '), name)));
+  }
+}
+
 function renderLights(lights) {
   const container = $('lights');
   const ips = lights.map(light => light.ip).join();
@@ -247,6 +265,11 @@ function renderState(message) {
   $('mode').className = message.mode;
   renderLights(message.lights);
   for (const input of document.querySelectorAll('[data-rule]')) input.checked = message.rules[input.dataset.rule];
+  for (const [stage, name] of [['lead', message.drop_lead], ['hit', message.drop_hit]]) {
+    const select = $(`drop-${stage}`);
+    if (document.activeElement !== select) select.value = name;
+    $(`drop-${stage}-why`).textContent = dropEffects[stage][name];
+  }
   if (document.activeElement !== $('max')) $('max').value = message.max_brightness;
   $('maxval').textContent = `${message.max_brightness}%`;
   if (document.activeElement !== $('sync')) $('sync').value = message.sync_offset_ms;
@@ -258,8 +281,8 @@ function nextEvents(now) {
   const parts = [];
   const phrase = timeline.phrases.find(p => p.start > now);
   if (phrase) parts.push(`next phrase in ${(phrase.start - now).toFixed(1)} s (${ENERGY_NAMES[Math.round(phrase.energy * 4)]})`);
-  const drop = timeline.parts.find(p => p.drop && p.start > now);
-  if (drop) parts.push(`drop in ${(drop.start - now).toFixed(1)} s`);
+  const drop = timeline.hits.find(([start]) => start > now);
+  if (drop) parts.push(`drop in ${(drop[0] - now).toFixed(1)} s`);
   const silence = timeline.silences.find(([start]) => start > now);
   if (silence) parts.push(`silence in ${(silence[0] - now).toFixed(1)} s`);
   return parts.join(' · ');
@@ -283,7 +306,10 @@ function describe(t) {
   const quiet = within(timeline.quiet);
   if (quiet) bits.push(`quiet, ${Math.round(quiet[2] * 100)}% of the phrase mid level`);
   if (within(timeline.flow)) bits.push('flow');
-  if (within(timeline.strobe)) bits.push('strobe');
+  const lead = within(timeline.leads);
+  if (lead) bits.push(`drop lead-in (${lead[2]})`);
+  const hit = within(timeline.hits);
+  if (hit) bits.push(`drop hit (${hit[2]})`);
   if (within(timeline.silences)) bits.push('silence');
   return bits.join(' · ');
 }
@@ -312,8 +338,9 @@ function drawOverview(now, t0, t1) {
   for (const part of timeline.parts) {
     ctx.fillStyle = energyColor(part.energy);
     ctx.fillRect(x(part.start), 0, Math.max(1, x(part.end) - x(part.start) - 1), height);
-    if (part.drop) { ctx.fillStyle = getComputedStyle(document.body).getPropertyValue('--drop'); ctx.fillRect(x(part.start), 0, 3, height); }
   }
+  ctx.fillStyle = getComputedStyle(document.body).getPropertyValue('--drop');
+  for (const [start] of timeline.hits) ctx.fillRect(x(start), 0, 3, height);
   ctx.fillStyle = 'rgba(255, 90, 79, .9)';
   for (const [start, end] of timeline.silences) ctx.fillRect(x(start), height - 6, Math.max(2, x(end) - x(start)), 6);
   ctx.strokeStyle = 'rgba(255,255,255,.6)';
@@ -367,10 +394,15 @@ function drawLive(now, t0, t1) {
   }
   ctx.fillStyle = '#2f6d8f';
   for (const [start, end] of spansIn(timeline.flow, t0, t1)) ctx.fillRect(x(start), mTop, x(end) - x(start), mBottom - mTop);
-  for (const [start, end] of spansIn(timeline.strobe, t0, t1)) {
-    const gradient = ctx.createLinearGradient(x(start), 0, x(end), 0);
-    for (let step = 0; step <= 6; step++) gradient.addColorStop(step / 6, `hsl(${step * 60} 90% 55%)`);
-    ctx.fillStyle = gradient;
+  ctx.fillStyle = style.getPropertyValue('--lead');
+  for (const [start, end] of spansIn(timeline.leads, t0, t1)) ctx.fillRect(x(start), mTop, x(end) - x(start), mBottom - mTop);
+  for (const [start, end] of spansIn(timeline.hits, t0, t1)) {
+    // A strobe hit shows its colours; the other hits are one colour.
+    if (state && state.drop_hit === 'strobe') {
+      const gradient = ctx.createLinearGradient(x(start), 0, x(end), 0);
+      for (let step = 0; step <= 6; step++) gradient.addColorStop(step / 6, `hsl(${step * 60} 90% 55%)`);
+      ctx.fillStyle = gradient;
+    } else ctx.fillStyle = style.getPropertyValue('--drop');
     ctx.fillRect(x(start), mTop, x(end) - x(start), mBottom - mTop);
   }
   ctx.fillStyle = style.getPropertyValue('--silence');
@@ -473,6 +505,7 @@ function connect() {
     const message = JSON.parse(event.data);
     if (message.type === 'hello') {
       renderRules(message.rules);
+      renderDropEffects(message.drop_effects);
       renderSettings(message.settings);
       $('log').replaceChildren();
       message.log.forEach(addLog);
@@ -491,6 +524,9 @@ $('rules-on').addEventListener('click', () => document.querySelectorAll('[data-r
 $('rules-off').addEventListener('click', () => document.querySelectorAll('[data-rule]').forEach(input => send({type: 'rule', name: input.dataset.rule, on: false})));
 $('lights-all').addEventListener('click', () => document.querySelectorAll('[data-ip]').forEach(input => send({type: 'light', ip: input.dataset.ip, on: true})));
 $('lights-none').addEventListener('click', () => document.querySelectorAll('[data-ip]').forEach(input => send({type: 'light', ip: input.dataset.ip, on: false})));
+for (const select of document.querySelectorAll('select[data-stage]')) {
+  select.addEventListener('change', () => send({type: 'drop_effect', stage: select.dataset.stage, name: select.value}));
+}
 $('reset').addEventListener('click', () => send({type: 'reset_settings'}));
 $('reanalyse').addEventListener('click', () => send({type: 'reanalyse'}));
 $('zoom').addEventListener('input', event => { windowSeconds = Number(event.target.value); $('zoomval').textContent = `${windowSeconds} s`; });

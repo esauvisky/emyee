@@ -13,7 +13,7 @@ from loguru import logger
 import atmospheric
 import light_controller
 import sections
-from light_controller import ANALYSIS_RULES, RULES, LightsController
+from light_controller import ANALYSIS_RULES, DROP_HITS, DROP_LEADS, RULES, LightsController
 from spotify_listener import SpotifyChangesListener
 
 STATIC_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "web")
@@ -46,6 +46,8 @@ SETTINGS = [
     ("Parts", sections, "BOUNDARY_PENALTY", "Cost of a boundary", "", 2, 30, 0.5, "song"),
     ("Parts", sections, "SNAP_BARS", "Snap to the change within", "bars", 0, 3, 1, "song"),
     ("Parts", light_controller, "PHRASE_GRID_MARGIN", "Count phrases from the end when", "×", 1, 3, 0.05, "song"),
+    ("Drops", light_controller, "BREAK_DB", "Break: under the bars on both sides", "dB", 2, 20, 0.5, "song"),
+    ("Drops", light_controller, "BREAK_RETURN_DB", "Break: music back within", "dB", 0, 10, 0.5, "song"),
     ("Drops", sections, "DROP_MAX_RATIO", "Peak distance shrinks to", "×", 0.1, 1, 0.05, "song"),
     ("Drops", sections, "DROP_MIN_FALL", "Peak distance falls by", "", 0, 5, 0.05, "song"),
     ("Drops", sections, "DROP_MAX_ARRIVAL", "Lands within", "", 0.5, 10, 0.1, "song"),
@@ -115,6 +117,8 @@ class WebApp:
             "song_time": self.controller.song_time(),
             "mode": self.controller.mode,
             "rules": self.controller.rules,
+            "drop_lead": self.controller.drop_lead,
+            "drop_hit": self.controller.drop_hit,
             "lights": self._lights(),
         }
 
@@ -135,6 +139,12 @@ class WebApp:
             logger.info("Rule {} switched {} from the web app", command["name"], "on" if command["on"] else "off")
             if command["name"] in ANALYSIS_RULES and self.controller.analysis is not None:
                 self.controller.reanalyse()
+        elif kind == "drop_effect":
+            effects = {"lead": DROP_LEADS, "hit": DROP_HITS}[command["stage"]]
+            if command["name"] not in effects:
+                raise ValueError(f"Unknown drop {command['stage']} effect {command['name']!r}")
+            setattr(self.controller, f"drop_{command['stage']}", command["name"])
+            logger.info("Drop {} effect set to {} from the web app", command["stage"], command["name"])
         elif kind == "max_brightness":
             self.controller.max_brightness = max(5, min(100, int(command["value"])))
         elif kind == "sync_offset":
@@ -167,6 +177,10 @@ class WebApp:
         await socket.send_str(json.dumps({
             "type": "hello",
             "rules": [{"name": name, "description": text} for name, text in RULES.items()],
+            "drop_effects": {
+                stage: [{"name": name, "description": text} for name, text in effects.items()]
+                for stage, effects in (("lead", DROP_LEADS), ("hit", DROP_HITS))
+            },
             "settings": self._settings(),
             "log": list(self.log_lines),
         }))

@@ -129,10 +129,58 @@ capped at a third of the gap. The colour is kept. Only a gap at least
 first beat after it relights in whatever mode it is in. A pulse whose release
 would land in the gap releases to the gap's dim level (0% for a dark gap).
 
-### Strobe — toggle `strobe`
-The first bar of every drop strobes: a new palette colour on every eighth
-note, brightness held at the phrase's band top. Skipped if that bar is quiet
-or flow, or if its phrase is too short for a colour of its own.
+### Drops: lead-in and hit — chosen in the web app's Drops section
+A **drop moment** is a lead-in bar and the hit bar after it. Two things make
+one:
+- a **break**: a bar whose loudness is at least `BREAK_DB` (6 dB) under both
+  the median of the `BREAK_LOOKBACK_BARS` (4) before it and the bar after it,
+  with the bar after back within `BREAK_RETURN_DB` (3 dB) of the bars before.
+  The music drains away, then slams back (Spicy's bar 58 fades from -12 to
+  -32 dB before bar 59 hits). The break is the lead-in, the bar after it the
+  hit.
+- a **drop part** (above): the bar before it is the lead-in, its first bar the
+  hit. When a drop part starts on a break, the break wins.
+
+A hit on a quiet or flow bar is no hit. A bar that is already a hit isn't
+also a lead-in (back-to-back drops). The lead-in and hit effects own their
+bars over the flow and quiet modes; a silence still dims the beats inside
+it.
+
+**Lead-in effects** (`DROP_LEADS`, default `fade_out`):
+- `none`: the bar plays by the normal rules.
+- `fade_out`: brightness fades from where it is to 0% across the bar, so the
+  hit comes out of the dark.
+- `blackout`: cut to 0% on the bar's first beat (`DROP_CUT_S`, 50 ms), dark
+  until the hit.
+- `burst_then_off`: a new palette colour every eighth note at the phrase's
+  band top, then dark for the last beat.
+- `riser`: each beat steps brightness up from the band's bottom to full and
+  the colour one palette step round the wheel.
+
+**Hit effects** (`DROP_HITS`, default `strobe`):
+- `none`: the bar plays by the normal rules.
+- `strobe`: a new palette colour every eighth note across the bar, held at
+  the phrase's band top.
+- `flash`: the first beat jumps to full in a new colour and decays over the
+  beat; pulses resume after it.
+- `white_flash`: the first beat jumps to full white and decays back into the
+  colour it interrupted.
+
+**Ideas not built yet**, for when these feel limited:
+- a build over the last 4–8 bars, not just one: brightness or the pulse
+  swing ramping up, or the colour turning faster each bar;
+- accelerating pulses (quarter notes, then eighths, then sixteenths), the
+  light version of a snare roll. The lamps merge commands closer than
+  `MIN_COMMAND_GAP_S` (200 ms), so sixteenths above about 75 BPM can't be
+  sent; eighths are the fastest that work at 125 BPM;
+- freeze: the colour and level hold still through the lead-in, then the hit
+  breaks it;
+- one bulb at a time: lamps lit in turn round the room during the lead-in,
+  all together on the hit (needs the lamps' positions);
+- a hit that holds full brightness for a whole bar before the normal swing
+  returns;
+- white-out: saturation draining to white through the lead-in, colour
+  snapping back on the hit.
 
 ### Flow — toggle `flow`
 A bar is **flow** when it has no transients to pulse on (a vocal over a

@@ -3,7 +3,7 @@ import bisect
 import json
 import os
 import time
-from typing import List, Optional
+from typing import List
 from dotenv import load_dotenv
 from loguru import logger
 from models import EventSongChanged, EventAdjustProgressTime, EventStop
@@ -73,8 +73,33 @@ FLOW_QUIET_DB = 6.0
 # is always one in range.
 FLOW_HUE_STEP_MIN = 20
 FLOW_HUE_STEP_MAX = 45
-# The first bar of every drop (see sections.py) strobes: a new colour every
-# eighth note, brightness held at the phrase's peak.
+# A break is a bar the music drains out of before slamming back: its loudness
+# at least BREAK_DB under both the median of the BREAK_LOOKBACK_BARS before it
+# and the bar after it, with the bar after back within BREAK_RETURN_DB of the
+# bars before. Spicy's bar 58 fades from -12 to -32 dB before the next hit.
+BREAK_DB = 6.0
+BREAK_LOOKBACK_BARS = 4
+BREAK_RETURN_DB = 3.0
+# A drop moment is a lead-in bar and the hit bar after it: a break and the bar
+# after it, or the bar before a drop part (sections.py) and the part's first
+# bar. Each stage plays one of these effects, chosen in the web app.
+DROP_LEADS = {
+    'none': "The lead-in bar plays by the normal rules",
+    'fade_out': "Brightness fades from where it is to 0% across the bar, so the hit comes out of the dark",
+    'blackout': "The lights cut to 0% on the bar's first beat and stay dark until the hit",
+    'burst_then_off': "A new colour every eighth note at the phrase's peak, then dark for the last beat",
+    'riser': "Each beat steps brightness up to full and the colour one palette step round the wheel",
+}
+DROP_HITS = {
+    'none': "The hit bar plays by the normal rules",
+    'strobe': "A new colour every eighth note across the bar, held at the phrase's peak",
+    'flash': "The first beat flashes to full in a new colour and decays over the beat",
+    'white_flash': "The first beat flashes white at full and decays back into the colour over the beat",
+}
+DEFAULT_DROP_LEAD = 'fade_out'
+DEFAULT_DROP_HIT = 'strobe'
+# A blackout falls this fast: a cut, not a fade.
+DROP_CUT_S = 0.05
 # Detected parts are split into phrases counted from the part's first bar:
 # PHRASE_BARS_CALM in parts below PHRASE_LOUD_ENERGY, PHRASE_BARS_LOUD in the
 # rest. Each phrase gets its own energy and its own colour. A leftover shorter
@@ -122,7 +147,6 @@ ANALYSIS_RULES = {'downbeat_fix'}
 RULES = {
     'downbeat_fix': "Bars follow a steady beat grid when Spotify's slip, with beat 1 where the music's changes land",
     'colour_changes': "Each phrase crosses into a new palette colour over its last bar",
-    'strobe': "The first bar of every drop strobes a new colour every eighth note",
     'flow': "Bars without transients drift slowly instead of pulsing",
     'flow_hue_drift': "Flow bars step the hue one palette colour up the wheel per bar",
     'quiet': "Breakdown bars hold one colour, dimmer the quieter they are",
@@ -178,12 +202,13 @@ class LightsController:
         self._silence_starts: list[float] = []
         self._silence_scheduled_for: int = -1    # index of the silence whose blackout is scheduled
         self._bar_loudness: list[float] = []
-        self._strobe_bars: dict[int, int] = {}   # strobe bar index → the drop part it opens
+        self._breaks: dict[int, str] = {}         # break bar index → why it is one
+        self._lead_bars: dict[int, str] = {}      # drop lead-in bar index → the drop it leads into
+        self._hit_bars: dict[int, str] = {}       # drop hit bar index → why it is a drop
         self._flow_bars: set[int] = set()
         self._flow_scheduled_for: int = -1       # bar index of the scheduled flow command
         self._short_sections: set[int] = set()   # sections the next colour fades across
-        self._strobe_task: Optional[asyncio.Task] = None
-        self._strobe_scheduled_for: int = -1     # bar index of the scheduled strobe
+        self._bar_effect_scheduled_for: int = -1  # bar index of the scheduled lead-in or strobe
         self._section_timbres: list = []
         self._beat_starts: list = []
         self.current_song: str = ""
@@ -212,6 +237,8 @@ class LightsController:
         self.atmospheric_pulse_on: int | None = None
         self.atmospheric_pulse_off: int | None = None
         self.rules: dict[str, bool] = {name: True for name in RULES}
+        self.drop_lead: str = DEFAULT_DROP_LEAD
+        self.drop_hit: str = DEFAULT_DROP_HIT
 
         # Web app display: brightness ramps over the last command's transition
         self._trans_start_bri: float = float(self.current_brightness)
@@ -224,7 +251,7 @@ class LightsController:
         self._color_trans_start_time: float = 0.0
         self._color_trans_duration: float = 0.0
         self._sent_color: tuple[int, int] | None = None   # last hue/sat sent to the devices
-        self.mode: str = ""                     # pulse, flow, quiet or strobe: logged when it changes
+        self.mode: str = ""                     # pulse, flow, quiet, lead-in or hit: logged when it changes
 
         self._current_params = {
             'hue': self.current_hue,
@@ -260,7 +287,6 @@ class LightsController:
                 if self.analysis is not None:
                     logger.warning("Lights stopped: {}", event.reason)
                 self._cancel_beat_task()
-                self._cancel_strobe_task()
                 self.analysis = None
             self.events_queue.task_done()
             await asyncio.sleep(CONTROLLER_TICK)
@@ -316,8 +342,7 @@ class LightsController:
             bisect.bisect_left(self._beat_starts, start) for start in self._section_bar_starts
         ]
         self._cancel_beat_task()
-        self._cancel_strobe_task()
-        self._strobe_scheduled_for = -1
+        self._bar_effect_scheduled_for = -1
         self._flow_scheduled_for = -1
         self.mode = ""
         self._silence_scheduled_for = -1
@@ -360,7 +385,8 @@ class LightsController:
                 "Phrase {} at {:.1f}s has {} bars (under {}): no colour of its own, the next colour crosses in across it",
                 index, self._section_bar_starts[index], section_bars[index + 1] - section_bars[index], MIN_COLOR_SECTION_BARS,
             )
-        self._compute_strobe_bars()
+        self._compute_breaks()
+        self._compute_drop_moments()
 
         self.min_segment_duration, self.beats_per_measure, self.avg_measure_duration = \
             min_segment_duration_from_future_measures(self.beats, self.bars, event.progress_time_ms)
@@ -706,27 +732,79 @@ class LightsController:
                 len(too_loud), FLOW_QUIET_DB, loud,
             )
 
-    def _compute_strobe_bars(self):
-        """The first bar of each drop, unless it is a quiet or flow bar or its
-        phrase is too short for a colour of its own."""
-        bar_starts = [bar['start'] for bar in self.bars]
-        self._strobe_bars = {}
-        for index, part in enumerate(self._parts):
-            if not part['drop']:
-                continue
-            bar = bisect.bisect_left(bar_starts, part['start'])
-            if bar in self._quiet_bars:
-                logger.debug("Drop part {} at {:.1f}s: no strobe, its first bar {} is quiet", index, part['start'], bar)
-            elif bar in self._flow_bars:
-                logger.debug("Drop part {} at {:.1f}s: no strobe, its first bar {} is a flow bar", index, part['start'], bar)
-            elif self._section_index_for_time(bar_starts[bar]) in self._short_sections:
-                logger.debug(
-                    "Drop part {} at {:.1f}s: no strobe, its first phrase is too short for a colour of its own",
-                    index, part['start'],
+    def _compute_breaks(self):
+        """Bars the music drains out of before slamming back (BREAK_DB)."""
+        loud = self._bar_loudness
+        self._breaks = {}
+        for bar in range(BREAK_LOOKBACK_BARS, len(self.bars) - 1):
+            before = float(np.median(loud[bar - BREAK_LOOKBACK_BARS:bar]))
+            under_before, under_after = before - loud[bar], loud[bar + 1] - loud[bar]
+            if under_before >= BREAK_DB and under_after >= BREAK_DB and loud[bar + 1] >= before - BREAK_RETURN_DB:
+                self._breaks[bar] = (
+                    f"break: bar {bar} is {under_before:.1f} dB under the {BREAK_LOOKBACK_BARS} bars before and "
+                    f"{under_after:.1f} dB under the bar after (at least {BREAK_DB} dB both ways)"
                 )
-            else:
-                self._strobe_bars[bar] = index
-                logger.debug("Drop part {} at {:.1f}s: strobe on its first bar {}", index, part['start'], bar)
+
+    def _compute_drop_moments(self):
+        """Lead-in and hit bars: each break leads into the bar after it, and
+        each drop part's first bar is led into by the bar before. When a drop
+        part starts on a break, the break wins: the hit is the bar after it.
+        A hit on a quiet or flow bar is no hit."""
+        bar_starts = [bar['start'] for bar in self.bars]
+        moments = {bar + 1: (bar, why) for bar, why in self._breaks.items()}
+        for index, part in enumerate(self._parts):
+            hit = bisect.bisect_left(bar_starts, part['start'])
+            if part['drop'] and hit not in moments and hit not in self._breaks:
+                # The first bar has no bar before it to lead in.
+                moments[hit] = (hit - 1 if hit else None, f"drop part {index}: {part['drop_why']}")
+        self._lead_bars, self._hit_bars = {}, {}
+        for hit, (lead, why) in sorted(moments.items()):
+            if hit in self._quiet_bars or hit in self._flow_bars:
+                logger.debug(
+                    "Drop at bar {} ({:.1f}s) skipped, the bar is {}: {}",
+                    hit, bar_starts[hit], 'quiet' if hit in self._quiet_bars else 'flow', why,
+                )
+                continue
+            self._hit_bars[hit] = why
+            # Back-to-back drops: a bar that is already a hit isn't a lead-in too.
+            if lead is not None and lead not in self._hit_bars:
+                self._lead_bars[lead] = why
+            logger.debug("Drop at bar {} ({:.1f}s), lead-in bar {}: {}", hit, bar_starts[hit], lead, why)
+
+    def _play_lead(self, bar: int, first_beat: int, current_time: float, energy: float, fade: float):
+        """Schedule the drop lead-in effect over bar `bar` from beat `first_beat`."""
+        bar_end = self.bars[bar]['start'] + self.bars[bar]['duration']
+        beats = [beat for beat in self.beats[first_beat:] if beat['start'] < bar_end - 0.01]
+        now = time.monotonic()
+
+        def at(song_time: float) -> float:
+            return now + (song_time - current_time)
+
+        bottom, top = band_for(energy)
+        if self.drop_lead == 'fade_out':
+            length = bar_end - beats[0]['start']
+            logger.debug("Bar {} lead-in: fade to 0% over {:.2f}s", bar, length)
+            self._start_beat_task(self._scheduled_hold(at(beats[0]['start']), length, 0.0))
+        elif self.drop_lead == 'blackout':
+            logger.debug("Bar {} lead-in: cut to 0% until the hit", bar)
+            self._start_beat_task(self._scheduled_hold(at(beats[0]['start']), DROP_CUT_S, 0.0))
+        elif self.drop_lead == 'burst_then_off':
+            eighths = [
+                (at(beat['start'] + half), beat['duration'] / 2)
+                for beat in beats[:-1] for half in (0.0, beat['duration'] / 2)
+            ]
+            logger.debug("Bar {} lead-in: {} colour steps, then dark for the last beat", bar, len(eighths))
+            self._start_beat_task(self._scheduled_strobe(eighths, to_brightness(top * fade)))
+            self._start_beat_task(self._scheduled_hold(at(beats[-1]['start']), DROP_CUT_S, 0.0))
+        elif self.drop_lead == 'riser':
+            steps = [
+                (at(beat['start']), beat['duration'], to_brightness((bottom + (1.0 - bottom) * (step + 1) / len(beats)) * fade))
+                for step, beat in enumerate(beats)
+            ]
+            logger.debug("Bar {} lead-in: {} steps up to full, one palette colour per beat", bar, len(steps))
+            self._start_beat_task(self._scheduled_riser(steps))
+        else:
+            raise ValueError(f"Unknown drop lead-in {self.drop_lead!r}")
 
     def _compute_section_timbres(self):
         """Average segment timbre vectors per section for structural boundary detection."""
@@ -927,14 +1005,23 @@ class LightsController:
             elif self.rules['silence'] and self._silence_at(next_beat['start']):
                 # The blackout owns beats inside a silence.
                 self._beat_scheduled_for = next_beat_idx
-            elif self.rules['strobe'] and self._beat_bar(next_beat_idx) in self._strobe_bars:
+            elif self.drop_lead != 'none' and self._beat_bar(next_beat_idx) in self._lead_bars:
+                # A drop's lead-in owns its whole bar: one schedule from this
+                # beat to the bar's end.
+                self._beat_scheduled_for = next_beat_idx
+                bar = self._beat_bar(next_beat_idx)
+                self._enter_mode('lead-in', bar, f"{self.drop_lead} before the drop ({self._lead_bars[bar]})")
+                if self._bar_effect_scheduled_for != bar:
+                    self._bar_effect_scheduled_for = bar
+                    self._play_lead(bar, next_beat_idx, current_time, energy_score, fade)
+            elif self.drop_hit == 'strobe' and self._beat_bar(next_beat_idx) in self._hit_bars:
                 # The strobe owns its whole bar: one task steps the colour on
                 # every eighth note from this beat to the bar's end.
                 self._beat_scheduled_for = next_beat_idx
                 bar = self._beat_bar(next_beat_idx)
-                self._enter_mode('strobe', bar, f"first bar of drop part {self._strobe_bars[bar]}")
-                if self._strobe_scheduled_for != bar:
-                    self._strobe_scheduled_for = bar
+                self._enter_mode('hit', bar, f"strobe on the drop ({self._hit_bars[bar]})")
+                if self._bar_effect_scheduled_for != bar:
+                    self._bar_effect_scheduled_for = bar
                     bar_end = self.bars[bar]['start'] + self.bars[bar].get('duration', 0.0)
                     eighths = []
                     for beat in self.beats[next_beat_idx:]:
@@ -948,8 +1035,7 @@ class LightsController:
                         "Bar {} strobe: {} colour steps, one per eighth note, held at the phrase's peak {:.1f}%",
                         bar, len(eighths), self._scale_brightness(peak),
                     )
-                    self._cancel_strobe_task()
-                    self._strobe_task = asyncio.create_task(self._scheduled_strobe(
+                    self._start_beat_task(self._scheduled_strobe(
                         [(now + (start - current_time), length) for start, length in eighths], peak,
                     ))
             elif self.rules['flow'] and self._beat_bar(next_beat_idx) in self._flow_bars:
@@ -1074,12 +1160,24 @@ class LightsController:
                     profile=profile_index, pulse=pulse, attack=attack, hold=hold,
                     release=release, high=self._scale_brightness(high), low=self._scale_brightness(low),
                 )
-                self._start_beat_task(
-                    self._scheduled_beat_pulse(
-                        deadline, high, low, beat_len,
-                        (attack, hold, release),
+                bar = self._beat_bar(next_beat_idx)
+                first_of_bar = next_beat_idx == 0 or self._beat_bar(next_beat_idx - 1) != bar
+                if self.drop_hit in ('flash', 'white_flash') and bar in self._hit_bars and first_of_bar:
+                    flash = to_brightness(fade)
+                    logger.debug(
+                        "Bar {} hit: {} to {:.1f}% on the first beat ({})",
+                        bar, self.drop_hit, self._scale_brightness(flash), self._hit_bars[bar],
                     )
-                )
+                    self._start_beat_task(self._scheduled_flash(
+                        deadline, beat_len, flash, low, self.drop_hit == 'white_flash',
+                    ))
+                else:
+                    self._start_beat_task(
+                        self._scheduled_beat_pulse(
+                            deadline, high, low, beat_len,
+                            (attack, hold, release),
+                        )
+                    )
 
         # Bar transition → recompute min-segment duration to track tempo changes
         if next_bar and self.last_next_bar != next_bar and next_bar['confidence'] > 0.8:
@@ -1131,6 +1229,34 @@ class LightsController:
                 deadline=deadline,
             )
 
+    async def _scheduled_riser(self, steps: list[tuple[float, float, float]]):
+        for deadline, length, level in steps:
+            await asyncio.sleep(max(0.0, deadline - self._device_latency() - time.monotonic()))
+            hue, saturation = self._flow_hue_sat()
+            await self.set_parameters(
+                length, brightness=level, change_color=True,
+                target_hue=hue, target_saturation=saturation, deadline=deadline,
+            )
+
+    async def _scheduled_flash(self, deadline: float, beat_duration: float, flash: float, base: float, white: bool):
+        """Jump to `flash` (white, or a new colour) and decay to `base` over the
+        beat. A white flash decays back into the colour it interrupted."""
+        await asyncio.sleep(max(0.0, deadline - self._device_latency() - time.monotonic()))
+        hue, saturation = self._color_at(deadline)
+        flash_hue, flash_saturation = (hue, 0) if white else get_vibrant_color(hue)
+        await self.set_parameters(
+            MIN_ATTACK_S, brightness=flash, change_color=True,
+            target_hue=flash_hue, target_saturation=flash_saturation, deadline=deadline,
+        )
+        # The release goes out MIN_COMMAND_GAP_S after the flash, so the lamp keeps both.
+        release_at = deadline + MIN_COMMAND_GAP_S
+        await asyncio.sleep(max(0.0, release_at - self._device_latency() - time.monotonic()))
+        back_hue, back_saturation = (hue, saturation) if white else (flash_hue, flash_saturation)
+        await self.set_parameters(
+            max(0.0, beat_duration - MIN_COMMAND_GAP_S), brightness=base, change_color=True,
+            target_hue=back_hue, target_saturation=back_saturation, deadline=release_at,
+        )
+
     async def _scheduled_silence(self, deadline: float, fade_s: float, dim: float, dark: bool):
         await self._scheduled_hold(deadline, fade_s, dim)
         if dark:
@@ -1148,7 +1274,7 @@ class LightsController:
         )
 
     def _enter_mode(self, mode: str, bar: int, why: str):
-        """Log a switch between pulse, flow, quiet and strobe once, with its reason."""
+        """Log a switch between pulse, flow, quiet, lead-in and hit once, with its reason."""
         if mode == self.mode:
             return
         self.mode = mode
@@ -1217,8 +1343,7 @@ class LightsController:
         """
         logger.info("Seek detected {:.2f}s → {:.2f}s; rescheduling", expected, current_time)
         self._cancel_beat_task()
-        self._cancel_strobe_task()
-        self._strobe_scheduled_for = -1
+        self._bar_effect_scheduled_for = -1
         self._flow_scheduled_for = -1
         self.mode = ""
         self._silence_scheduled_for = -1
@@ -1257,11 +1382,6 @@ class LightsController:
         for task in list(self._beat_tasks):
             task.cancel()
         self._beat_tasks.clear()
-
-    def _cancel_strobe_task(self):
-        if self._strobe_task and not self._strobe_task.done():
-            self._strobe_task.cancel()
-        self._strobe_task = None
 
     async def set_parameters(
         self,
@@ -1398,7 +1518,8 @@ class LightsController:
             ],
             'quiet': [[*bar_span(bar), level] for bar, level in sorted(self._quiet_bars.items())],
             'flow': [list(bar_span(bar)) for bar in sorted(self._flow_bars)],
-            'strobe': [list(bar_span(bar)) for bar in sorted(self._strobe_bars)],
+            'leads': [[*bar_span(bar), why] for bar, why in sorted(self._lead_bars.items())],
+            'hits': [[*bar_span(bar), why] for bar, why in sorted(self._hit_bars.items())],
             'silences': [[start, end] for start, end, _ in self._silences],
             # Spotify gives no audio, only per-segment loudness: onset, peak
             # and when the peak lands. The page draws its envelope.
