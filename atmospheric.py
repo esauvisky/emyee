@@ -2,8 +2,8 @@
 
 Brightness is planned in perceptual *levels* (0–1, equal steps look equal)
 and only converted to device brightness at the end. Each section gets a band
-of levels from its activity: calm sections swing gently in a narrow band up
-high, active ones swing from near black to full. Pulses then place each
+of levels from its activity: calm sections swing gently in a narrow, dim
+band, active ones swing from near black to full. Pulses then place each
 beat's peak inside that band and release back to its bottom.
 """
 
@@ -19,10 +19,18 @@ VISIBLE_MIN = 2.0
 OFF_MIN_ACTIVITY = 0.9
 
 
+# The calmest section swings between CALM_BOTTOM_SHARE of CALM_TOP_LEVEL and
+# CALM_TOP_LEVEL (about 15–40% brightness), so quiet music is dim and loud
+# music is bright, not the other way round. Both ends open up linearly with
+# activity to the full 0–1 swing.
+CALM_TOP_LEVEL = 0.63
+CALM_BOTTOM_SHARE = 0.61
+
+
 def band_for(activity: float) -> tuple[float, float]:
     """(bottom, top) levels a section with this activity (0–1) swings between."""
-    top = 1.0 - 0.15 * (1 - activity)
-    bottom = top * 0.85 * (1 - activity)
+    top = CALM_TOP_LEVEL + (1.0 - CALM_TOP_LEVEL) * activity
+    bottom = top * CALM_BOTTOM_SHARE * (1 - activity)
     if activity < OFF_MIN_ACTIVITY:
         bottom = max(bottom, (VISIBLE_MIN / 100) ** (1 / PERCEPTUAL_GAMMA))
     return bottom, top
@@ -192,6 +200,7 @@ def _check():
     assert profile_for(1.0, 4) == (0, ATMOSPHERIC_DB[4][0])
     assert profile_for(1.0, 24) == (1, ATMOSPHERIC_DB[4][1])
     assert band_for(1.0) == (0.0, 1.0)
+    assert 14 <= to_brightness(band_for(0.0)[0]) <= 16 and 39 <= to_brightness(band_for(0.0)[1]) <= 41
     assert to_brightness(band_for(0.75)[0]) >= VISIBLE_MIN
     assert all(
         band_for(a / 4)[1] - band_for(a / 4)[0] < band_for((a + 1) / 4)[1] - band_for((a + 1) / 4)[0]
