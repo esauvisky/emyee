@@ -27,10 +27,18 @@ changes peak on is taken as the real beat 1.
   The one whose best beat collects the larger share of the changes wins: the
   steady grid on most electronic tracks, Spotify's on some live recordings
   whose odd bars are real.
-- Beat 1 then moves later by that many beats only when one beat collects at
-  least `DOWNBEAT_MIN_SHARE` (35%) of the change and `DOWNBEAT_MIN_LEAD`
-  (1.5×) what the grid's beat 1 collects. Otherwise no beat stands out and it
-  stays.
+- In 4-beat bars a strong **backbeat** settles it first: the claps or snare
+  on beats 2 and 4 make every other beat of the steady grid hit louder. Per
+  bar, the loudest hits of beats 1 and 3 minus those of 2 and 4; when the mean
+  is at least `BACKBEAT_MIN_T` (6) standard errors from zero, the loud pair is
+  taken as the real beats 2 and 4, beat 1 is one of the other two, and the
+  music's changes pick which. The steady grid is used. Thunderstorm's
+  backbeat (t = -19) puts beat 1 on steady beat 3, where the changes alone
+  only leaned toward beat 2 (30%). A weaker alternation proves nothing: on
+  some mixes the kick beats are the louder ones.
+- Otherwise beat 1 moves later only when one beat collects at least
+  `DOWNBEAT_MIN_SHARE` (35%) of the change and `DOWNBEAT_MIN_LEAD` (1.5×)
+  what the grid's beat 1 collects. If no beat stands out, it stays.
 - Everything built on bars follows: parts, phrases, colour changes, drop
   effects, quiet and flow bars. Switching the toggle re-runs the song's
   analysis; off keeps Spotify's bars untouched.

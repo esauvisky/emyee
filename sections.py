@@ -53,6 +53,14 @@ DROP_MIN_BARS = 4
 DOWNBEAT_SPANS = (4, 8, 16)
 DOWNBEAT_MIN_SHARE = 0.35
 DOWNBEAT_MIN_LEAD = 1.5
+# In 4-beat bars the claps or snare land on beats 2 and 4, so every other beat
+# of a steady grid is louder: the backbeat. Per bar, the loudest hits of beats
+# 1 and 3 minus those of beats 2 and 4; when their mean is at least
+# BACKBEAT_MIN_T standard errors from zero the backbeat settles which pair of
+# beats can be beat 1 (the beat before a loud one), and the music's changes
+# pick between the two. Weaker alternation proves nothing: on some mixes the
+# kick beats are the louder ones.
+BACKBEAT_MIN_T = 6.0
 
 
 def bar_features(analysis: dict, bars: list[dict]) -> np.ndarray:
@@ -134,9 +142,10 @@ def change_shares(peaks: list[list[tuple[int, float]]], positions: np.ndarray, p
 
 def bar_grids(analysis: dict, bars: list[dict], beats: list[dict]) -> dict:
     """Beats per bar, Spotify's first bar's beat, how many of Spotify's bars
-    hold another beat count (slips), and the share of the music's changes on
-    each beat of Spotify's bars and of a steady grid of per_bar beats laid
-    from Spotify's first bar (index 0 is beat 1 of each)."""
+    hold another beat count (slips), the backbeat of a steady grid (4-beat
+    bars only), and the share of the music's changes on each beat of
+    Spotify's bars and of a steady grid of per_bar beats laid from Spotify's
+    first bar (index 0 is beat 1 of each)."""
     beat_starts = [beat["start"] for beat in beats]
     bar_beats = [bisect.bisect_left(beat_starts, bar["start"] - 1e-3) for bar in bars]
     per_bar = int(np.median(np.diff(bar_beats)))
@@ -149,10 +158,32 @@ def bar_grids(analysis: dict, bars: list[dict], beats: list[dict]) -> dict:
     return {
         "per_bar": per_bar,
         "first_beat": first,
+        # Only 4-beat bars have a backbeat.
+        "backbeat": backbeat(analysis, beats, first) if per_bar == 4 else None,
         "slips": int(np.sum(np.diff(bar_beats) != per_bar)),
         "spotify": change_shares(peaks, spotify_positions, per_bar),
         "steady": change_shares(peaks, steady_positions, per_bar),
     }
+
+
+def backbeat(analysis: dict, beats: list[dict], first_beat: int) -> tuple[float, float]:
+    """Over the 4-beat bars of a steady grid from `first_beat`: how much
+    louder beats 1 and 3 hit than beats 2 and 4 (dB, mean per bar), and that
+    mean in standard errors. Negative when 2 and 4 are the loud ones."""
+    segments = analysis["segments"]
+    segment_starts = [s["start"] for s in segments]
+    loudest = []
+    for beat in beats:
+        start, end = beat["start"], beat["start"] + beat["duration"]
+        first = max(0, bisect.bisect_right(segment_starts, start) - 1)
+        loudest.append(max(
+            s["loudness_max"] for s in segments[first:bisect.bisect_left(segment_starts, end)]
+            if s["start"] + s["duration"] > start
+        ))
+    count = (len(beats) - first_beat) // 4
+    bars = np.array(loudest[first_beat:first_beat + 4 * count]).reshape(count, 4)
+    difference = (bars[:, 0] + bars[:, 2] - bars[:, 1] - bars[:, 3]) / 2
+    return float(difference.mean()), float(difference.mean() / (difference.std() / np.sqrt(count)))
 
 
 def downbeat_shift(shares: np.ndarray) -> int:

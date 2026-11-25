@@ -43,6 +43,8 @@ SETTINGS = [
     ("Flow", light_controller, "FLOW_MAX_ONSET_DB", "Onset rise under", "dB", 1, 20, 0.5, "song"),
     ("Flow", light_controller, "FLOW_MAX_BEAT_CONFIDENCE", "Beat confidence under", "", 0, 1, 0.05, "song"),
     ("Flow", light_controller, "FLOW_QUIET_DB", "Under the loud bars", "dB", 0, 30, 0.5, "song"),
+    ("Bars", sections, "BACKBEAT_MIN_T", "Backbeat decides when t is over", "", 2, 20, 0.5, "song"),
+    ("Bars", sections, "DOWNBEAT_MIN_SHARE", "Move beat 1 when a beat gets", "share", 0.25, 0.8, 0.01, "song"),
     ("Parts", sections, "BOUNDARY_PENALTY", "Cost of a boundary", "", 2, 30, 0.5, "song"),
     ("Parts", sections, "SNAP_BARS", "Snap to the change within", "bars", 0, 3, 1, "song"),
     ("Parts", light_controller, "PHRASE_GRID_MARGIN", "Count phrases from the end when", "×", 1, 3, 0.05, "song"),

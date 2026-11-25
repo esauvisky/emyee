@@ -23,7 +23,7 @@ import numpy as np
 from atmospheric import VISIBLE_MIN, band_for, profile_for, pulses_for, to_brightness
 from light_device import BaseLightDevice
 from sections import (
-    DOWNBEAT_SPANS, MIN_PART_BARS, bar_features, bar_grids, detect_sections, downbeat_shift, shift_bars, steady_bars,
+    BACKBEAT_MIN_T, DOWNBEAT_SPANS, MIN_PART_BARS, bar_features, bar_grids, detect_sections, downbeat_shift, shift_bars, steady_bars,
     texture_steps,
 )
 
@@ -434,21 +434,42 @@ class LightsController:
             return
         grids = bar_grids(self.analysis, self.bars, self.beats)
         per_bar = grids['per_bar']
-        steady = grids['steady'].max() >= grids['spotify'].max()
-        shares = grids['steady' if steady else 'spotify']
-        shift = downbeat_shift(shares)
 
         def spread(values):
             return ', '.join(f"beat {index + 1} {100 * share:.0f}%" for index, share in enumerate(values))
 
-        grid = (
+        changes = (
             f"Spotify's {per_bar}-beat bars slip {grids['slips']} time(s). Music's changes on Spotify's bars: "
-            f"{spread(grids['spotify'])}; on a steady {per_bar}-beat grid: {spread(grids['steady'])}. "
-            + ("The steady grid gathers them more sharply" if steady else "Spotify's bars gather them more sharply")
+            f"{spread(grids['spotify'])}; on a steady {per_bar}-beat grid: {spread(grids['steady'])}"
         )
+        backbeat = grids['backbeat']
+        if backbeat is not None and abs(backbeat[1]) >= BACKBEAT_MIN_T:
+            # Beats 2 and 4 are the loud pair, so beat 1 is the beat before one of them.
+            louder, t = backbeat
+            candidates = (1, 3) if louder > 0 else (0, 2)
+            steady = True
+            shift = max(candidates, key=lambda index: grids['steady'][index])
+            other = candidates[1] if shift == candidates[0] else candidates[0]
+            grid = (
+                f"{changes}. Steady beats {'1 and 3' if louder > 0 else '2 and 4'} hit {abs(louder):.1f} dB a bar louder "
+                f"than the other two (t {t:+.1f}, at least {BACKBEAT_MIN_T}): a backbeat, so they are the real beats "
+                f"2 and 4 and beat 1 is steady beat {candidates[0] + 1} or {candidates[1] + 1}. The changes pick beat "
+                f"{shift + 1} ({100 * grids['steady'][shift]:.0f}% vs {100 * grids['steady'][other]:.0f}%)"
+            )
+        else:
+            steady = grids['steady'].max() >= grids['spotify'].max()
+            shift = downbeat_shift(grids['steady' if steady else 'spotify'])
+            backbeat_note = (
+                "" if backbeat is None
+                else f" (backbeat t {backbeat[1]:+.1f}, under {BACKBEAT_MIN_T}: no clear backbeat)"
+            )
+            grid = (
+                f"{changes}{backbeat_note}. "
+                + ("The steady grid gathers them more sharply" if steady else "Spotify's bars gather them more sharply")
+            )
         beat_one = (
             f"beat {shift + 1} is the real downbeat, so beat 1 moves {shift} beat(s) later" if shift
-            else "no beat stands out over beat 1, so it stays"
+            else "beat 1 stays"
         )
         if not self.rules['downbeat_fix']:
             logger.debug("Bars: {}; {}. The downbeat_fix rule is off, so Spotify's bars are kept", grid, beat_one)
