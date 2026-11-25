@@ -157,6 +157,9 @@ PHRASE_MIN_S = 7.0
 # home colour's palette neighbour, so every phrase still changes colour.
 IDENTITY_DISTANCE = 2.0
 IDENTITY_NEIGHBOUR_STEP = 40
+# Saturation follows phrase energy: a phrase's colour keeps
+# SATURATION_FLOOR of its palette saturation at energy 0, all of it at 1.
+SATURATION_FLOOR = 0.55
 # One log file per played track, down to DEBUG. The per-lamp command lines
 # are TRACE and stay out of it.
 SONG_LOG_DIR = "logs"
@@ -175,6 +178,7 @@ RULES = {
     'downbeat_fix': "Bars follow a steady beat grid when Spotify's slip, with beat 1 where the music's changes land",
     'colour_changes': "Each phrase crosses into a new palette colour over its last bar",
     'colour_identity': "Parts that sound alike share a home colour, so a returning chorus comes back in its colour",
+    'energy_saturation': "Calm phrases get softer colours, intense ones fully saturated",
     'calm_style': "Calm songs breathe once per bar, gentler, with slower colour changes and no drop effects",
     'flow': "Bars without transients drift slowly instead of pulsing",
     'flow_hue_drift': "Flow bars step the hue one palette colour up the wheel per bar",
@@ -1489,6 +1493,9 @@ class LightsController:
             self._phrase_colours[section_idx] if self.rules['colour_identity']
             else self._section_hue_sat(self.sections[section_idx])
         )
+        if self.rules['energy_saturation']:
+            energy = self._section_energies[section_idx]
+            saturation = round(saturation * (SATURATION_FLOOR + (1 - SATURATION_FLOOR) * energy))
         start_mono = time.monotonic() + (start - current_time)
         start_hue, start_sat = self._color_at(start_mono)
         self._color_trans_start_hue = float(start_hue)

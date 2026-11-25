@@ -287,6 +287,11 @@ group; adjacent parts sit 3.05 apart (median), so they rarely merge.
   long part): then the palette colour nearest `IDENTITY_NEIGHBOUR_STEP` (40°)
   up from home. Every phrase still changes colour.
 
+### Saturation follows energy — toggle `energy_saturation`
+A phrase's colour keeps `SATURATION_FLOOR` (55%) of its palette saturation
+at energy 0, all of it at energy 1: calm phrases look softer, intense ones
+vivid.
+
 ### Short phrases
 A phrase shorter than `MIN_COLOR_SECTION_BARS` (4) gets no colour of its
 own: the crossing into the next full phrase starts on its first bar and runs
