@@ -22,7 +22,7 @@ import numpy as np
 
 from atmospheric import VISIBLE_MIN, band_for, profile_for, pulses_for, to_brightness
 from light_device import BaseLightDevice
-from sections import detect_sections
+from sections import DOWNBEAT_SPANS, detect_sections, downbeat_shares, downbeat_shift, shift_bars
 
 # A bar whose loudest hit is this many dB under the median loudest hit of the
 # QUIET_LOOKBACK_BARS before it is a breakdown: it holds one colour instead of
@@ -105,9 +105,12 @@ IDENTIFY_BLINKS = 3
 IDENTIFY_BLINK_S = 0.3
 # Names of the five energy levels, matching ATMOSPHERIC_DB in atmospheric.py.
 ENERGY_NAMES = ("very calm", "calm", "medium", "energetic", "peak")
+# Rules read only when a track's analysis runs: switching one re-runs it.
+ANALYSIS_RULES = {'downbeat_fix'}
 # Mechanics that can be switched off at runtime (from the web app) to judge
 # each one by eye. All start on. RULES.md describes every rule in full.
 RULES = {
+    'downbeat_fix': "Bars move onto the beat the music's changes land on when Spotify's downbeat is off",
     'colour_changes': "Each phrase crosses into a new palette colour over its last bar",
     'strobe': "The first bar of every drop strobes a new colour every eighth note",
     'flow': "Bars without transients drift slowly instead of pulsing",
@@ -273,6 +276,12 @@ class LightsController:
             [b for b in self.analysis['bars'] if b.get('confidence', 1.0) >= conf],
             key=lambda x: x['start'],
         )
+        self.beats = sorted(
+            [b for b in self.analysis['beats'] if b.get('confidence', 1.0) >= conf],
+            key=lambda x: x['start'],
+        )
+        self._beat_starts = [b['start'] for b in self.beats]
+        self._fix_downbeat()
         self._parts = detect_sections(self.analysis, self.bars)
         self._part_energies = self._energies_for(self._parts)
         logger.debug(
@@ -288,11 +297,6 @@ class LightsController:
             self._section_bar_starts.append(
                 bar_starts[bar_index] if bar_index < len(bar_starts) else section.get('start', 0.0)
             )
-        self.beats = sorted(
-            [b for b in self.analysis['beats'] if b.get('confidence', 1.0) >= conf],
-            key=lambda x: x['start'],
-        )
-        self._beat_starts = [b['start'] for b in self.beats]
         # Pulse cycles restart on each section's first beat, so every section
         # needs its first beat index and how many beats it spans.
         self._section_first_beat = [
@@ -379,6 +383,29 @@ class LightsController:
     def song_time(self) -> float:
         """Song position now, run on from the last progress tick."""
         return self._last_progress + (time.monotonic() - self._last_progress_mono)
+
+    def _fix_downbeat(self):
+        """Move Spotify's bars onto the beat the music's changes land on
+        (sections.py): part, phrase, colour and strobe boundaries follow."""
+        # A track too short for the longest window can't be judged.
+        if len(self.bars) < 2 or len(self.beats) < 2 * max(DOWNBEAT_SPANS) + 5:
+            logger.debug("Downbeat: too few beats to judge, Spotify's bars kept")
+            return
+        per_bar, shares = downbeat_shares(self.analysis, self.bars, self.beats)
+        shift = downbeat_shift(shares)
+        spread = ', '.join(f"beat {index + 1} {100 * share:.0f}%" for index, share in enumerate(shares))
+        if not shift:
+            logger.debug("Downbeat: changes by beat of Spotify's {}-beat bars: {}. No beat stands out over beat 1, "
+                         "Spotify's bars kept", per_bar, spread)
+            return
+        if not self.rules['downbeat_fix']:
+            logger.debug("Downbeat: changes by beat of Spotify's {}-beat bars: {}. Bars would move {} beat(s) later, "
+                         "but the downbeat_fix rule is off", per_bar, spread, shift)
+            return
+        self.bars = shift_bars(self.bars, self.beats, shift)
+        logger.info("Downbeat: changes by beat of Spotify's {}-beat bars: {}. Spotify's beat {} is the real downbeat, "
+                    "so every bar moves {} beat(s) later (first bar now {:.2f}s)",
+                    per_bar, spread, shift + 1, shift, self.bars[0]['start'])
 
     def _split_phrases(self) -> list[dict]:
         """Cut each part into phrases of a fixed bar count from its first bar,

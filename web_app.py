@@ -13,7 +13,7 @@ from loguru import logger
 import atmospheric
 import light_controller
 import sections
-from light_controller import RULES, LightsController
+from light_controller import ANALYSIS_RULES, RULES, LightsController
 
 STATIC_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "web")
 LIGHT_KINDS = {"LightDevice": "Yeelight", "ESPHomeDevice": "ESPHome", "TasmotaDevice": "Tasmota"}
@@ -128,6 +128,8 @@ class WebApp:
         if kind == "rule":
             self.controller.rules[command["name"]] = bool(command["on"])
             logger.info("Rule {} switched {} from the web app", command["name"], "on" if command["on"] else "off")
+            if command["name"] in ANALYSIS_RULES and self.controller.analysis is not None:
+                self.controller.reanalyse()
         elif kind == "max_brightness":
             self.controller.max_brightness = max(5, min(100, int(command["value"])))
         elif kind == "sync_offset":

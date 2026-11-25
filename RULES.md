@@ -8,6 +8,22 @@ judge them by eye; the rest are structural and always run.
 
 ## 1. Structure
 
+### Downbeat fix — toggle `downbeat_fix` (`sections.py`)
+Spotify's bar grid is sometimes a beat or two off the real downbeat: on many
+techno tracks new parts, drops and breakdowns all land on beat 2 of its bars.
+New sounds enter on the downbeat, so the beat of the bar that the music's
+changes peak on is taken as the real beat 1.
+- A change is a local peak (within 2 beats) of the distance between the mean
+  sound (loudness, timbre, chords) of the beats after a beat and before it,
+  over windows of `DOWNBEAT_SPANS` (4, 8 and 16 beats). Each peak counts by
+  its height above the median.
+- The bars move later by that many beats only when one beat collects at least
+  `DOWNBEAT_MIN_SHARE` (35%) of the change and `DOWNBEAT_MIN_LEAD` (1.5×) what
+  Spotify's beat 1 collects. Otherwise no beat stands out and Spotify's grid
+  stays.
+- Everything built on bars follows: parts, phrases, colour changes, strobes,
+  quiet and flow bars. Switching the toggle re-runs the song's analysis.
+
 ### Parts (`sections.py`)
 The track is split into **parts**: runs of bars that are most uniform in
 loudness, timbre and harmony (pitch-class content). The split is an exact

@@ -39,6 +39,19 @@ DROP_MAX_RATIO = 0.5
 DROP_MIN_FALL = 1.25
 DROP_MAX_ARRIVAL = 3.0
 DROP_MIN_BARS = 4
+# Spotify's bar grid is sometimes a beat or two off the music's real
+# downbeat: on many techno tracks new parts, drops and breakdowns all land on
+# beat 2 of its bars. New sounds enter on the downbeat, so the beat of the
+# bar that the music's changes peak on is the real beat 1. A change is a local
+# peak (within 2 beats) of the distance between the mean sound of the
+# DOWNBEAT_SPANS beats after a beat and before it; each peak counts by its
+# height above the median. The bars move only when one beat of the bar
+# collects at least DOWNBEAT_MIN_SHARE of the change and DOWNBEAT_MIN_LEAD
+# times what Spotify's beat 1 collects; otherwise no beat stands out and
+# Spotify's grid stays.
+DOWNBEAT_SPANS = (4, 8, 16)
+DOWNBEAT_MIN_SHARE = 0.35
+DOWNBEAT_MIN_LEAD = 1.5
 
 
 def bar_features(analysis: dict, bars: list[dict]) -> np.ndarray:
@@ -62,6 +75,75 @@ def bar_features(analysis: dict, bars: list[dict]) -> np.ndarray:
     timbre = features[:, 1:13]
     features[:, 1:13] = (timbre - timbre.mean(axis=0)) / timbre.std(axis=0) * (TIMBRE_WEIGHT / np.sqrt(timbre.shape[1]))
     return features
+
+
+def beat_features(analysis: dict, beats: list[dict]) -> np.ndarray:
+    """One row per beat: loudness, timbre and pitch-class strengths of the
+    segments sounding in it, weighted by overlap, each column standardised."""
+    segments = analysis["segments"]
+    segment_starts = [s["start"] for s in segments]
+    rows = []
+    for beat in beats:
+        start, end = beat["start"], beat["start"] + beat["duration"]
+        first = max(0, bisect.bisect_right(segment_starts, start) - 1)
+        sounding = [
+            (s, min(s["start"] + s["duration"], end) - max(s["start"], start))
+            for s in segments[first:bisect.bisect_left(segment_starts, end)]
+        ]
+        sounding, overlap = zip(*[(s, o) for s, o in sounding if o > 0])
+        rows.append(np.concatenate((
+            [np.average([s["loudness_max"] for s in sounding], weights=overlap)],
+            np.average([s["timbre"] for s in sounding], axis=0, weights=overlap),
+            np.average([s["pitches"] for s in sounding], axis=0, weights=overlap),
+        )))
+    features = np.array(rows)
+    return (features - features.mean(axis=0)) / features.std(axis=0)
+
+
+def downbeat_shares(analysis: dict, bars: list[dict], beats: list[dict]) -> tuple[int, np.ndarray]:
+    """Beats per bar, and the share of the music's changes landing on each
+    beat of Spotify's bars (index 0 is Spotify's beat 1)."""
+    beat_starts = [beat["start"] for beat in beats]
+    bar_beats = [bisect.bisect_left(beat_starts, bar["start"] - 1e-3) for bar in bars]
+    per_bar = int(np.median(np.diff(bar_beats)))
+    features = beat_features(analysis, beats)
+    count = len(features)
+    shares = []
+    for span in DOWNBEAT_SPANS:
+        novelty = np.zeros(count)
+        for index in range(span, count - span):
+            novelty[index] = np.linalg.norm(features[index:index + span].mean(axis=0) - features[index - span:index].mean(axis=0))
+        median = np.median(novelty[span:count - span])
+        score = np.zeros(per_bar)
+        for index in range(span + 2, count - span - 2):
+            if novelty[index] == novelty[index - 2:index + 3].max() and novelty[index] > median:
+                score[(index - bar_beats[0]) % per_bar] += novelty[index] - median
+        shares.append(score / score.sum())
+    return per_bar, np.mean(shares, axis=0)
+
+
+def downbeat_shift(shares: np.ndarray) -> int:
+    """Beats to move Spotify's bars later by, 0 when no beat stands out."""
+    best = int(np.argmax(shares))
+    if best and shares[best] >= DOWNBEAT_MIN_SHARE and shares[best] >= DOWNBEAT_MIN_LEAD * shares[0]:
+        return best
+    return 0
+
+
+def shift_bars(bars: list[dict], beats: list[dict], shift: int) -> list[dict]:
+    """Bars starting `shift` beats later than Spotify's. A bar whose shifted
+    start runs past the last beat is dropped."""
+    beat_starts = [beat["start"] for beat in beats]
+    starts = []
+    for bar in bars:
+        index = bisect.bisect_left(beat_starts, bar["start"] - 1e-3) + shift
+        if index < len(beat_starts):
+            starts.append((beat_starts[index], bar))
+    shifted = []
+    for position, (start, bar) in enumerate(starts):
+        end = starts[position + 1][0] if position + 1 < len(starts) else start + bar["duration"]
+        shifted.append({**bar, "start": start, "duration": end - start})
+    return shifted
 
 
 def part_starts(features: np.ndarray) -> list[int]:
