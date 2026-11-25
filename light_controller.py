@@ -64,10 +64,17 @@ SILENCE_DARK_FADE_S = 0.4
 FLOW_MAX_ONSET_DB = 8.0
 FLOW_MAX_BEAT_CONFIDENCE = 0.5
 FLOW_MIN_BARS = 2
-# A bar within this many dB of the track's loud bars (90th percentile) is
-# never flow: a brickwalled drop has no headroom for an onset to rise into
-# and loses Spotify's beat tracker, yet it is the loudest part of the song.
+# A soft, unsure bar also has to sit FLOW_QUIET_DB under the track's loud bars
+# (90th percentile) to flow: a brickwalled drop has soft onsets and loses
+# Spotify's beat tracker, yet it is the loudest part of the song. But when the
+# track's loudest FLOW_LOUD_SHARE of bars hit hard (they'd fail the flow test
+# together), a soft bar whose beat confidence is under FLOW_CONFIDENCE_SHARE of
+# theirs flows however loud it is: a kickless build-up in a quietly mastered
+# track sits only a few dB under its drop. A verse Spotify is merely a little
+# unsure of keeps pulsing.
 FLOW_QUIET_DB = 6.0
+FLOW_LOUD_SHARE = 0.25
+FLOW_CONFIDENCE_SHARE = 0.5
 # Each flow bar drifts the hue to the nearest palette colour at least this far
 # up the wheel over the whole bar. The hue between palette colours (mid
 # crossing, or the random start) can sit inside the palette's widest gap (40
@@ -817,10 +824,11 @@ class LightsController:
         return index >= 0 and start < self._silences[index][1] <= end
 
     def _compute_flow_bars(self):
-        """Bars without transients: soft segment onsets, beats Spotify only
-        inferred from the tempo, and FLOW_QUIET_DB under the track's loud
-        bars. Gaps shorter than FLOW_MIN_BARS inside a flow run are flow;
-        runs shorter than it are not."""
+        """Bars without transients: soft segment onsets and beats Spotify only
+        inferred from the tempo, and either FLOW_QUIET_DB under the track's
+        loud bars or (when those hit hard) beat confidence far under theirs.
+        Gaps shorter than FLOW_MIN_BARS inside a flow run are flow; runs
+        shorter than it are not."""
         # The min_confidence filter can leave a track without bars.
         if not self.bars:
             self._flow_bars = set()
@@ -830,7 +838,7 @@ class LightsController:
         beats = self.analysis['beats']
         beat_starts = [b['start'] for b in beats]
         loud = float(np.percentile(self._bar_loudness, 90))
-        onsets, confidences, flags = [], [], []
+        onsets, confidences = [], []
         for index, bar in enumerate(self.bars):
             start = bar['start']
             end = start + bar.get('duration', 0.0)
@@ -841,10 +849,24 @@ class LightsController:
             confidence = float(np.mean([b.get('confidence', 1.0) for b in beats_in_bar])) if beats_in_bar else 0.0
             onsets.append(onset)
             confidences.append(confidence)
-            flags.append(
-                onset < FLOW_MAX_ONSET_DB and confidence < FLOW_MAX_BEAT_CONFIDENCE
-                and self._bar_loudness[index] < loud - FLOW_QUIET_DB
-            )
+        loudest = np.argsort(self._bar_loudness)[-max(1, round(FLOW_LOUD_SHARE * len(self.bars))):]
+        loud_onset = float(np.median([onsets[index] for index in loudest]))
+        loud_confidence = float(np.median([confidences[index] for index in loudest]))
+        brickwalled = loud_onset < FLOW_MAX_ONSET_DB or loud_confidence < FLOW_MAX_BEAT_CONFIDENCE
+        beatless = FLOW_CONFIDENCE_SHARE * loud_confidence
+        logger.debug(
+            "Flow: the loudest {:.0f}% of bars rise {:.1f} dB at onset with beat confidence {:.2f}, so {}",
+            100 * FLOW_LOUD_SHARE, loud_onset, loud_confidence,
+            f"the master is brickwalled: soft bars must sit {FLOW_QUIET_DB} dB under the loud bars to flow"
+            if brickwalled else
+            f"the loud bars hit hard: soft bars flow {FLOW_QUIET_DB} dB under them, or at any loudness with beat "
+            f"confidence under {beatless:.2f} ({FLOW_CONFIDENCE_SHARE:.0%} of theirs)",
+        )
+        flags = [
+            onset < FLOW_MAX_ONSET_DB and confidence < FLOW_MAX_BEAT_CONFIDENCE
+            and (level < loud - FLOW_QUIET_DB or (not brickwalled and confidence < beatless))
+            for onset, confidence, level in zip(onsets, confidences, self._bar_loudness)
+        ]
 
         def runs():
             out = []
@@ -866,22 +888,25 @@ class LightsController:
             span = range(first, last + 1)
             logger.debug(
                 "Flow bars {}–{} ({:.1f}s): no transients to pulse on, so one slow drift per bar. Mean onset rise "
-                "{:.1f} dB (flow under {}), beat confidence {:.2f} (under {}), {:.1f} dB under the loud bars (at least {})",
+                "{:.1f} dB (flow under {}), beat confidence {:.2f} (under {}), {:.1f} dB under the loud bars",
                 first, last, self.bars[first]['start'],
                 np.mean([onsets[i] for i in span]), FLOW_MAX_ONSET_DB,
                 np.mean([confidences[i] for i in span]), FLOW_MAX_BEAT_CONFIDENCE,
-                loud - np.mean([self._bar_loudness[i] for i in span]), FLOW_QUIET_DB,
+                loud - np.mean([self._bar_loudness[i] for i in span]),
             )
         too_loud = [
             index for index in range(len(self.bars))
             if onsets[index] < FLOW_MAX_ONSET_DB and confidences[index] < FLOW_MAX_BEAT_CONFIDENCE
             and self._bar_loudness[index] >= loud - FLOW_QUIET_DB
+            and (brickwalled or confidences[index] >= beatless)
         ]
         if too_loud:
             logger.debug(
-                "{} bars have soft onsets and unsure beats but sit within {} dB of the loud bars ({:.1f} dB), "
-                "so they pulse: a loud mix leaves no headroom for an onset to rise into",
+                "{} bars have soft onsets and unsure beats but sit within {} dB of the loud bars ({:.1f} dB), so they "
+                "pulse: {}",
                 len(too_loud), FLOW_QUIET_DB, loud,
+                "a loud mix leaves no headroom for an onset to rise into" if brickwalled
+                else f"Spotify still hears their beat (confidence at least {beatless:.2f})",
             )
 
     def _compute_breaks(self):

@@ -43,6 +43,7 @@ SETTINGS = [
     ("Flow", light_controller, "FLOW_MAX_ONSET_DB", "Onset rise under", "dB", 1, 20, 0.5, "song"),
     ("Flow", light_controller, "FLOW_MAX_BEAT_CONFIDENCE", "Beat confidence under", "", 0, 1, 0.05, "song"),
     ("Flow", light_controller, "FLOW_QUIET_DB", "Under the loud bars", "dB", 0, 30, 0.5, "song"),
+    ("Flow", light_controller, "FLOW_CONFIDENCE_SHARE", "Or beat confidence under the loud bars'", "×", 0, 1, 0.05, "song"),
     ("Character", light_controller, "CALM_DRIVE", "Calm style under drive", "", 0, 1, 0.05, "song"),
     ("Character", light_controller, "CALM_ENERGY_SCALE", "Calm energy scale", "×", 0.2, 1, 0.05, "song"),
     ("Colour", light_controller, "IDENTITY_DISTANCE", "Parts share a colour within", "", 0, 6, 0.1, "song"),

@@ -221,6 +221,14 @@ pad). All three must hold:
 - bar loudness at least `FLOW_QUIET_DB` (6 dB) under the track's loud bars
   (90th percentile). A brickwalled drop has soft onsets and loses the beat
   tracker, but it is the loudest part of the song.
+- Except when the track's loudest `FLOW_LOUD_SHARE` (25%) of bars hit hard
+  (taken together they would fail the flow test): then a soft bar whose beat
+  confidence is under `FLOW_CONFIDENCE_SHARE` (50%) of theirs flows at any
+  loudness. A kickless build-up in a quietly mastered track sits only 3–6 dB
+  under its drop (Brejcha's "House Music", bars 25–34); a verse Spotify is
+  only a little unsure of keeps pulsing. Over 100 tracks this adds flow bars
+  to 12 and leaves every brickwalled track (Skrillex, Muse, SOAD, Justice)
+  unchanged.
 Runs shorter than `FLOW_MIN_BARS` (2) don't flip the mode either way. A flow
 bar sends one command that settles brightness over the whole bar at a level
 set by the bar's loudness rank inside the band.
