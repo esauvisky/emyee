@@ -204,7 +204,7 @@ set by the bar's loudness rank inside the band.
 
 ### Flow hue drift — toggle `flow_hue_drift`
 Each flow bar also drifts the hue to the nearest palette colour
-`FLOW_HUE_STEP_MIN`–`FLOW_HUE_STEP_MAX` (20–45°) up the wheel, so long flow
+at least `FLOW_HUE_STEP_MIN` (20°) up the wheel, so long flow
 runs move one way round the wheel. Skipped while a phrase colour change is
 crossing the bar.
 

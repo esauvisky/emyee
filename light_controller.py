@@ -68,11 +68,11 @@ FLOW_MIN_BARS = 2
 # never flow: a brickwalled drop has no headroom for an onset to rise into
 # and loses Spotify's beat tracker, yet it is the loudest part of the song.
 FLOW_QUIET_DB = 6.0
-# Each flow bar drifts the hue to the nearest palette colour this far up the
-# wheel over the whole bar. The palette's widest gap is 40 degrees, so there
-# is always one in range.
+# Each flow bar drifts the hue to the nearest palette colour at least this far
+# up the wheel over the whole bar. The hue between palette colours (mid
+# crossing, or the random start) can sit inside the palette's widest gap (40
+# degrees), so there is no upper bound: the step is at most about 60 degrees.
 FLOW_HUE_STEP_MIN = 20
-FLOW_HUE_STEP_MAX = 45
 # A break is a bar the music drains out of before slamming back: its loudness
 # at least BREAK_DB under both the median of the BREAK_LOOKBACK_BARS before it
 # and the bar after it, with the bar after back within BREAK_RETURN_DB of the
@@ -1321,12 +1321,11 @@ class LightsController:
         return bisect.bisect_right([part['start'] for part in self._parts], start) - 1
 
     def _flow_hue_sat(self) -> tuple[int, int]:
-        """The nearest palette colour FLOW_HUE_STEP_MIN–FLOW_HUE_STEP_MAX
-        degrees up the wheel, so flow bars drift one way instead of wandering."""
+        """The nearest palette colour at least FLOW_HUE_STEP_MIN degrees up the
+        wheel, so flow bars drift one way instead of wandering."""
         current = self._current_params['hue']
         return min(
-            (color for color in VIBRANT_COLOR_PALETTE
-             if FLOW_HUE_STEP_MIN <= (color[0] - current) % 360 <= FLOW_HUE_STEP_MAX),
+            (color for color in VIBRANT_COLOR_PALETTE if (color[0] - current) % 360 >= FLOW_HUE_STEP_MIN),
             key=lambda color: (color[0] - current) % 360,
         )
 
