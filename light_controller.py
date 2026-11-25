@@ -203,9 +203,7 @@ class LightsController:
         self.atmospheric_pulse_off: int | None = None
         self.rules: dict[str, bool] = {name: True for name in RULES}
 
-        # Panel animation: interpolate displayed color over the transition duration
-        self._trans_start_hue: float = float(self.current_hue)
-        self._trans_start_sat: float = float(self.current_saturation)
+        # Web app display: brightness ramps over the last command's transition
         self._trans_start_bri: float = float(self.current_brightness)
         self._trans_start_time: float = 0.0
         self._trans_duration: float = 0.0
@@ -721,22 +719,19 @@ class LightsController:
                 return max(0.05, 1.0 - (current_time - self._fade_out_start) / remaining)
         return 1.0
 
-    def _panel_interp(self) -> tuple:
-        """Interpolated (hue, sat, bri) for panel animation — matches the smooth bulb transition."""
+    def _panel_brightness(self) -> float:
+        """Brightness the lamps are at now, ramping over the last command's transition."""
         if self._trans_duration <= 0:
-            return float(self.current_hue), float(self.current_saturation), float(self.current_brightness)
+            return float(self.current_brightness)
         t = min(1.0, (time.monotonic() - self._trans_start_time) / self._trans_duration)
-        # Shortest-arc hue interpolation (handles 350→10 going through 0 correctly)
-        diff = ((self.current_hue - self._trans_start_hue) + 180) % 360 - 180
-        h = (self._trans_start_hue + diff * t) % 360
-        s = self._trans_start_sat + (self.current_saturation - self._trans_start_sat) * t
-        b = self._trans_start_bri + (self.current_brightness - self._trans_start_bri) * t
-        return h, s, b
+        return self._trans_start_bri + (self.current_brightness - self._trans_start_bri) * t
 
     def panel_state(self) -> tuple:
-        """Return (hue, sat, bri) as ints for the terminal panel."""
-        h, s, b = self._panel_interp()
-        return int(h), int(s), int(b)
+        """(hue, sat, bri) the lamps show now, as ints for the web app. The
+        colour is where its crossing has got to: a crossing runs over a bar
+        while the commands carrying it ramp over a fraction of a beat."""
+        hue, saturation = self._color_at(time.monotonic())
+        return int(hue), int(saturation), int(self._panel_brightness())
 
     def _section_hue_sat(self, section: dict):
         """A palette colour 40–MAX_HUE_STEP degrees from the current hue."""
@@ -1272,10 +1267,7 @@ class LightsController:
         send_color = change_color or (cmd_hue, cmd_sat) != self._sent_color
 
         # Capture current interpolated position as the start of the panel animation
-        ph, ps, pb = self._panel_interp()
-        self._trans_start_hue = ph
-        self._trans_start_sat = ps
-        self._trans_start_bri = pb
+        self._trans_start_bri = self._panel_brightness()
         self._trans_start_time = now
         self._trans_duration = duration
 
