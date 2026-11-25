@@ -80,7 +80,10 @@ calm, medium, energetic, peak), which choose the pulse profile.
 Parts are cut into **phrases** counted from their first bar:
 `PHRASE_BARS_LOUD` (8) bars in parts with energy ≥ `PHRASE_LOUD_ENERGY`
 (0.5), `PHRASE_BARS_CALM` (4) in calmer ones. A leftover shorter than
-`PHRASE_MIN_BARS` (2) joins its neighbour. A part that isn't a whole number
+`PHRASE_MIN_BARS` (2) joins its neighbour. The phrase length doubles until
+a phrase lasts at least `PHRASE_MIN_S` (7 s), so fast or 3/4 songs with bars
+of about a second don't change colour every few seconds: over 99 tracks the
+median is 4.6 colour changes a minute, at most 8. A part that isn't a whole number
 of phrases has a lead-in or a tail: its phrases count back from its last bar
 instead of its first when the texture changes (loudness and timbre, bar to
 bar; chords change on almost every bar in a loop) at the phrase starts that

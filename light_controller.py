@@ -143,6 +143,9 @@ CALM_ENERGY_SCALE = 0.6
 CALM_HUE_FADE_BARS = 2
 CHARACTERS = ('auto', 'calm', 'driving')
 OVERRIDES_FILE = "track_overrides.json"
+# Phrase lengths double until a phrase lasts at least PHRASE_MIN_S, so fast or
+# 3/4 tracks (bars of about a second) don't change colour every few seconds.
+PHRASE_MIN_S = 7.0
 # One log file per played track, down to DEBUG. The per-lamp command lines
 # are TRACE and stay out of it.
 SONG_LOG_DIR = "logs"
@@ -545,11 +548,14 @@ class LightsController:
         segment_starts = [s.get('start', 0.0) for s in segments]
         duration = self.analysis.get('track', {}).get('duration', 0.0)
         part_bars = [bisect.bisect_left(bar_starts, part['start']) for part in self._parts] + [len(self.bars)]
+        bar_seconds = float(np.median([bar['duration'] for bar in self.bars]))
         phrases = []
         for index, part in enumerate(self._parts):
             first, end = part_bars[index], part_bars[index + 1]
             energy = self._part_energies[index]
             length = PHRASE_BARS_LOUD if energy >= PHRASE_LOUD_ENERGY else PHRASE_BARS_CALM
+            while length * bar_seconds < PHRASE_MIN_S:
+                length *= 2
             cuts, grid = self._phrase_cuts(first, end, length)
             logger.debug(
                 "Part {:>2} at {:6.1f}s, {:>3} bars: energy {:.2f} ({} {}, so {}-bar phrases, {}) | {}: {}",
