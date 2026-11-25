@@ -95,6 +95,10 @@
     <div class="row">Max brightness <input id="max" type="range" min="5" max="100" step="5"><span id="maxval" class="value"></span></div>
     <div class="row">Sync offset <input id="sync" type="range" min="-300" max="300" step="5"><span id="syncval" class="value"></span></div>
 
+    <h2>Song character</h2>
+    <label class="row">Style <select id="character"><option value="auto">auto</option><option value="calm">calm</option><option value="driving">driving</option></select></label>
+    <small class="effect-why" id="character-why"></small>
+
     <h2>Drops</h2>
     <label class="row">Lead-in <select id="drop-lead" data-stage="lead"></select></label><small class="effect-why" id="drop-lead-why"></small>
     <label class="row">Hit <select id="drop-hit" data-stage="hit"></select></label><small class="effect-why" id="drop-hit-why"></small>
@@ -265,6 +269,11 @@ function renderState(message) {
   $('mode').className = message.mode;
   renderLights(message.lights);
   for (const input of document.querySelectorAll('[data-rule]')) input.checked = message.rules[input.dataset.rule];
+  const character = message.character;
+  if (document.activeElement !== $('character')) $('character').value = character.override;
+  $('character-why').textContent = message.playing
+    ? `drive ${character.drive.toFixed(2)}: plays ${character.calm ? 'calm (one breath a bar, no drop effects)' : 'driving'}${character.override === 'auto' ? ' (measured)' : ' (forced for this song)'}`
+    : '';
   for (const [stage, name] of [['lead', message.drop_lead], ['hit', message.drop_hit]]) {
     const select = $(`drop-${stage}`);
     if (document.activeElement !== select) select.value = name;
@@ -394,9 +403,11 @@ function drawLive(now, t0, t1) {
   }
   ctx.fillStyle = '#2f6d8f';
   for (const [start, end] of spansIn(timeline.flow, t0, t1)) ctx.fillRect(x(start), mTop, x(end) - x(start), mBottom - mTop);
+  // Calm style plays no drop effects.
+  const leads = timeline.calm ? [] : timeline.leads, hits = timeline.calm ? [] : timeline.hits;
   ctx.fillStyle = style.getPropertyValue('--lead');
-  for (const [start, end] of spansIn(timeline.leads, t0, t1)) ctx.fillRect(x(start), mTop, x(end) - x(start), mBottom - mTop);
-  for (const [start, end] of spansIn(timeline.hits, t0, t1)) {
+  for (const [start, end] of spansIn(leads, t0, t1)) ctx.fillRect(x(start), mTop, x(end) - x(start), mBottom - mTop);
+  for (const [start, end] of spansIn(hits, t0, t1)) {
     // A strobe hit shows its colours; the other hits are one colour.
     if (state && state.drop_hit === 'strobe') {
       const gradient = ctx.createLinearGradient(x(start), 0, x(end), 0);
@@ -527,6 +538,7 @@ $('lights-none').addEventListener('click', () => document.querySelectorAll('[dat
 for (const select of document.querySelectorAll('select[data-stage]')) {
   select.addEventListener('change', () => send({type: 'drop_effect', stage: select.dataset.stage, name: select.value}));
 }
+$('character').addEventListener('change', event => send({type: 'character', value: event.target.value}));
 $('reset').addEventListener('click', () => send({type: 'reset_settings'}));
 $('reanalyse').addEventListener('click', () => send({type: 'reanalyse'}));
 $('zoom').addEventListener('input', event => { windowSeconds = Number(event.target.value); $('zoomval').textContent = `${windowSeconds} s`; });

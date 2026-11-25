@@ -24,7 +24,7 @@ from atmospheric import VISIBLE_MIN, band_for, profile_for, pulses_for, to_brigh
 from light_device import BaseLightDevice
 from sections import (
     BACKBEAT_MIN_T, DOWNBEAT_SPANS, MIN_PART_BARS, bar_features, bar_grids, detect_sections, downbeat_shift, shift_bars, steady_bars,
-    texture_steps,
+    texture_steps, track_drive,
 )
 
 # A bar whose loudest hit is this many dB under the median loudest hit of the
@@ -130,6 +130,19 @@ MIN_COMMAND_GAP_S = 0.2
 MAX_HUE_STEP = 90
 # Bars over which the hue crosses in, ending on the section's first beat.
 HUE_FADE_BARS = 1
+# A track whose drive (sections.track_drive) is under CALM_DRIVE plays in calm
+# style: each bar breathes once on its first beat instead of pulsing on every
+# beat, energies are scaled by CALM_ENERGY_SCALE so bands stay gentler, colour
+# crossings take CALM_HUE_FADE_BARS, and there are no drop effects. Measured
+# on 99 tracks, every genre swung the same ~0.28 of the range per beat before:
+# energy is ranked inside each song, so a ballad's loudest bar pulsed like a
+# techno peak. The web app can force a song calm or driving; the choice is
+# kept per track in OVERRIDES_FILE.
+CALM_DRIVE = 0.5
+CALM_ENERGY_SCALE = 0.6
+CALM_HUE_FADE_BARS = 2
+CHARACTERS = ('auto', 'calm', 'driving')
+OVERRIDES_FILE = "track_overrides.json"
 # One log file per played track, down to DEBUG. The per-lamp command lines
 # are TRACE and stay out of it.
 SONG_LOG_DIR = "logs"
@@ -141,12 +154,13 @@ IDENTIFY_BLINK_S = 0.3
 # Names of the five energy levels, matching ATMOSPHERIC_DB in atmospheric.py.
 ENERGY_NAMES = ("very calm", "calm", "medium", "energetic", "peak")
 # Rules read only when a track's analysis runs: switching one re-runs it.
-ANALYSIS_RULES = {'downbeat_fix'}
+ANALYSIS_RULES = {'downbeat_fix', 'calm_style'}
 # Mechanics that can be switched off at runtime (from the web app) to judge
 # each one by eye. All start on. RULES.md describes every rule in full.
 RULES = {
     'downbeat_fix': "Bars follow a steady beat grid when Spotify's slip, with beat 1 where the music's changes land",
     'colour_changes': "Each phrase crosses into a new palette colour over its last bar",
+    'calm_style': "Calm songs breathe once per bar, gentler, with slower colour changes and no drop effects",
     'flow': "Bars without transients drift slowly instead of pulsing",
     'flow_hue_drift': "Flow bars step the hue one palette colour up the wheel per bar",
     'quiet': "Breakdown bars hold one colour, dimmer the quieter they are",
@@ -216,6 +230,12 @@ class LightsController:
         self.current_track_id: str = ""
         self.timeline_id: int = 0                # bumped on every loaded track, so the web app resends the timeline
         self.disabled_devices: set[str] = set()  # IPs switched off from the web app: sent nothing
+        self.drive: float = 0.0                  # how driving the loaded track is (0–1)
+        self.calm: bool = False                  # the loaded track plays in calm style
+        # No overrides file until the first song is forced calm or driving.
+        self.character_overrides: dict[str, str] = (
+            json.load(open(OVERRIDES_FILE)) if os.path.exists(OVERRIDES_FILE) else {}
+        )
         self._song_log: int | None = None        # loguru sink id of the current track's file
         self._tatum_starts: list = []
         self._fade_in_end: float = 0.0
@@ -316,6 +336,7 @@ class LightsController:
         )
         self._beat_starts = [b['start'] for b in self.beats]
         self._fix_bar_grid()
+        self._judge_character(event.track_id)
         self._parts = detect_sections(self.analysis, self.bars)
         self._part_energies = self._energies_for(self._parts)
         logger.debug(
@@ -422,6 +443,40 @@ class LightsController:
     def song_time(self) -> float:
         """Song position now, run on from the last progress tick."""
         return self._last_progress + (time.monotonic() - self._last_progress_mono)
+
+    def _judge_character(self, track_id: str):
+        """Decide calm or driving style for the loaded track (CALM_DRIVE), or
+        take the song's override from the web app."""
+        self.drive, features = track_drive(self.analysis)
+        measured = ', '.join(f"{name} {value:.2f}" for name, value in features.items())
+        override = self.character_overrides.get(track_id)
+        if not self.rules['calm_style']:
+            self.calm = False
+            why = "the calm_style rule is off"
+        elif override:
+            self.calm = override == 'calm'
+            why = f"forced {override} for this song from the web app"
+        else:
+            self.calm = self.drive < CALM_DRIVE
+            why = f"drive {'under' if self.calm else 'at least'} {CALM_DRIVE}"
+        logger.info(
+            "Character: drive {:.2f} ({}), so {} style: {}",
+            self.drive, measured, 'calm' if self.calm else 'driving', why,
+        )
+
+    def set_character_override(self, character: str):
+        """Force the loaded song calm or driving ('auto' clears it), keep the
+        choice in OVERRIDES_FILE and re-run the song's analysis."""
+        if character not in CHARACTERS:
+            raise ValueError(f"Unknown character {character!r}")
+        if character == 'auto':
+            self.character_overrides.pop(self.current_track_id, None)
+        else:
+            self.character_overrides[self.current_track_id] = character
+        with open(OVERRIDES_FILE, "w") as f:
+            json.dump(self.character_overrides, f, indent=1)
+        logger.info("Character for {} set to {} from the web app", self.current_song, character)
+        self.reanalyse()
 
     def _fix_bar_grid(self):
         """Lay the bars on the grid the music's changes gather on (Spotify's
@@ -545,6 +600,8 @@ class LightsController:
 
     def _compute_section_energies(self):
         self._section_energies = self._energies_for(self.sections)
+        if self.calm:
+            self._section_energies = [energy * CALM_ENERGY_SCALE for energy in self._section_energies]
         logger.debug(
             "Phrases (index:start/energy, ranked like parts): {}",
             ' '.join(
@@ -607,6 +664,9 @@ class LightsController:
             )
             self._bar_peaks.append(max((s['loudness_max'] for s, _ in sounding), default=-60.0))
         peaks = self._bar_peaks
+        order = np.argsort(self._bar_loudness, kind='stable')
+        self._bar_loudness_rank = np.empty(len(order))
+        self._bar_loudness_rank[order] = np.arange(len(order)) / max(len(order) - 1, 1)
         # How far each bar's loudest hit sits under the bars leading into it.
         deficits = [0.0] + [
             float(np.median(peaks[max(0, index - QUIET_LOOKBACK_BARS):index])) - peaks[index]
@@ -954,7 +1014,7 @@ class LightsController:
             else:
                 bar_starts = [bar['start'] for bar in self.bars]
                 fade_start = max(
-                    bar_starts[max(0, bisect.bisect_left(bar_starts, target_start) - HUE_FADE_BARS)],
+                    bar_starts[max(0, bisect.bisect_left(bar_starts, target_start) - (CALM_HUE_FADE_BARS if self.calm else HUE_FADE_BARS))],
                     self._section_bar_starts[current_section_index],
                 )
             lead_beat = max(0, bisect.bisect_left(self._beat_starts, fade_start) - 1)
@@ -1026,7 +1086,7 @@ class LightsController:
             elif self.rules['silence'] and self._silence_at(next_beat['start']):
                 # The blackout owns beats inside a silence.
                 self._beat_scheduled_for = next_beat_idx
-            elif self.drop_lead != 'none' and self._beat_bar(next_beat_idx) in self._lead_bars:
+            elif not self.calm and self.drop_lead != 'none' and self._beat_bar(next_beat_idx) in self._lead_bars:
                 # A drop's lead-in owns its whole bar: one schedule from this
                 # beat to the bar's end.
                 self._beat_scheduled_for = next_beat_idx
@@ -1035,7 +1095,7 @@ class LightsController:
                 if self._bar_effect_scheduled_for != bar:
                     self._bar_effect_scheduled_for = bar
                     self._play_lead(bar, next_beat_idx, current_time, energy_score, fade)
-            elif self.drop_hit == 'strobe' and self._beat_bar(next_beat_idx) in self._hit_bars:
+            elif not self.calm and self.drop_hit == 'strobe' and self._beat_bar(next_beat_idx) in self._hit_bars:
                 # The strobe owns its whole bar: one task steps the colour on
                 # every eighth note from this beat to the bar's end.
                 self._beat_scheduled_for = next_beat_idx
@@ -1113,9 +1173,15 @@ class LightsController:
                 ):
                     logger.trace("Beat {:>3} | quiet, hold at {:.1f}%", next_beat_idx, self._scale_brightness(resting))
                     self._start_beat_task(self._scheduled_hold(deadline, beat_len, resting))
+            elif self.calm and next_beat_idx and self._beat_bar(next_beat_idx - 1) == self._beat_bar(next_beat_idx):
+                # Calm style breathes once per bar: the bar's first beat owns it.
+                self._beat_scheduled_for = next_beat_idx
             else:
                 self._beat_scheduled_for = next_beat_idx
-                self._enter_mode('pulse', self._beat_bar(next_beat_idx), "pulse on every beat")
+                self._enter_mode(
+                    'pulse', self._beat_bar(next_beat_idx),
+                    f"one breath per bar (calm, drive {self.drive:.2f})" if self.calm else "pulse on every beat",
+                )
                 deadline = time.monotonic() + fire_in
                 section_first_beat = self._section_first_beat[current_section_index]
                 section_end_beat = (
@@ -1127,8 +1193,15 @@ class LightsController:
                 pulses = pulses_for(
                     profile, self.atmospheric_pulse_on, self.atmospheric_pulse_off,
                 )
-                pulse, attack, hold, release = pulses[(next_beat_idx - section_first_beat) % len(pulses)]
-                beat_len = next_beat.get('duration', 0.5)
+                if self.calm:
+                    # The breath spans the whole bar; the cycle steps once per bar.
+                    bar = self._beat_bar(next_beat_idx)
+                    first_bar = self._beat_bar(section_first_beat)
+                    pulse, attack, hold, release = pulses[(bar - first_bar) % len(pulses)]
+                    beat_len = self.bars[bar]['start'] + self.bars[bar]['duration'] - next_beat['start']
+                else:
+                    pulse, attack, hold, release = pulses[(next_beat_idx - section_first_beat) % len(pulses)]
+                    beat_len = next_beat.get('duration', 0.5)
                 # Envelopes are beat fractions tuned around 120 BPM. In a slow
                 # song the snappy profiles leave 30-50ms jumps between very
                 # different levels, which read as flashes once the low end is
@@ -1163,7 +1236,14 @@ class LightsController:
                 # The section's band sets the swing; the pulse places this
                 # beat's peak inside it, pulled down on quieter segments.
                 bottom, top = band_for(energy_score)
-                strength = pulse * (0.5 + 0.5 * self._segment_loudness(self.segments[seg_idx])) if self.rules['loudness_pulse'] else pulse
+                if not self.rules['loudness_pulse']:
+                    strength = pulse
+                elif self.calm:
+                    # A breath spans the bar, so the whole bar's loudness, ranked in the track, sets it.
+                    bar = self._beat_bar(next_beat_idx)
+                    strength = pulse * (0.3 + 0.7 * self._bar_loudness_rank[bar])
+                else:
+                    strength = pulse * (0.5 + 0.5 * self._segment_loudness(self.segments[seg_idx]))
                 low = to_brightness(bottom * fade)
                 # A release landing after the blackout would relight the lamp.
                 upcoming = self._silence_starting_in(next_beat['start'], next_beat['start'] + beat_len)
@@ -1183,7 +1263,7 @@ class LightsController:
                 )
                 bar = self._beat_bar(next_beat_idx)
                 first_of_bar = next_beat_idx == 0 or self._beat_bar(next_beat_idx - 1) != bar
-                if self.drop_hit in ('flash', 'white_flash') and bar in self._hit_bars and first_of_bar:
+                if not self.calm and self.drop_hit in ('flash', 'white_flash') and bar in self._hit_bars and first_of_bar:
                     flash = to_brightness(fade)
                     logger.debug(
                         "Bar {} hit: {} to {:.1f}% on the first beat ({})",
@@ -1547,6 +1627,8 @@ class LightsController:
                 [s['start'], s['duration'], s['loudness_start'], s['loudness_max'], s['loudness_max_time']]
                 for s in self.analysis['segments']
             ],
+            # Calm style plays no drop effects, so the page doesn't draw them.
+            'calm': self.calm,
             'fade_in_end': self._fade_in_end,
             'fade_out_start': min(self._fade_out_start, self._track_duration),
         }

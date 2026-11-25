@@ -63,6 +63,37 @@ DOWNBEAT_MIN_LEAD = 1.5
 BACKBEAT_MIN_T = 6.0
 
 
+# How driving a track is (0 calm, 1 driving): a logistic fit on 67 tracks
+# labelled by ear, from three things Spotify measures for the whole track. A
+# loud master, a beat Spotify is sure of and a bright timbre mean driving;
+# quiet, loose and dark mean calm. Leave-one-out it labels 90% of those tracks
+# right; busy bebop (Seatbelts) is the kind it gets wrong, hence the per-song
+# override in the web app. Each feature is (value - mean) / scale.
+DRIVE_FEATURES = ("loudness", "beat confidence", "timbre brightness")
+DRIVE_MEANS = (-9.144, 0.535, 20.372)
+DRIVE_SCALES = (4.424, 0.207, 51.495)
+DRIVE_WEIGHTS = (1.079, 1.594, 1.370)
+DRIVE_BIAS = 0.604
+
+
+def track_drive(analysis: dict) -> tuple[float, dict]:
+    """How driving the track is (0–1), and the features that decided it:
+    Spotify's track loudness, the median beat confidence, and the median
+    timbre brightness of the segments in the middle 80% of the track."""
+    duration = analysis["track"]["duration"]
+    body = [s for s in analysis["segments"] if 0.1 * duration < s["start"] < 0.9 * duration]
+    features = {
+        "loudness": analysis["track"]["loudness"],
+        "beat confidence": float(np.median([beat["confidence"] for beat in analysis["beats"]])),
+        "timbre brightness": float(np.median([s["timbre"][1] for s in body])),
+    }
+    score = DRIVE_BIAS + sum(
+        weight * (features[name] - mean) / scale
+        for name, mean, scale, weight in zip(DRIVE_FEATURES, DRIVE_MEANS, DRIVE_SCALES, DRIVE_WEIGHTS)
+    )
+    return float(1 / (1 + np.exp(-score))), features
+
+
 def bar_features(analysis: dict, bars: list[dict]) -> np.ndarray:
     """One row per bar: loudness, the 12 timbre coefficients and the 12
     pitch-class strengths, averaged over the segments sounding in the bar

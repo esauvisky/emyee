@@ -27,5 +27,6 @@ __pycache__/
 .cache
 *tokens.json
 analysis.json
+track_overrides.json
 recordings/
 logs/

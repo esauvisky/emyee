@@ -43,6 +43,8 @@ SETTINGS = [
     ("Flow", light_controller, "FLOW_MAX_ONSET_DB", "Onset rise under", "dB", 1, 20, 0.5, "song"),
     ("Flow", light_controller, "FLOW_MAX_BEAT_CONFIDENCE", "Beat confidence under", "", 0, 1, 0.05, "song"),
     ("Flow", light_controller, "FLOW_QUIET_DB", "Under the loud bars", "dB", 0, 30, 0.5, "song"),
+    ("Character", light_controller, "CALM_DRIVE", "Calm style under drive", "", 0, 1, 0.05, "song"),
+    ("Character", light_controller, "CALM_ENERGY_SCALE", "Calm energy scale", "×", 0.2, 1, 0.05, "song"),
     ("Bars", sections, "BACKBEAT_MIN_T", "Backbeat decides when t is over", "", 2, 20, 0.5, "song"),
     ("Bars", sections, "DOWNBEAT_MIN_SHARE", "Move beat 1 when a beat gets", "share", 0.25, 0.8, 0.01, "song"),
     ("Parts", sections, "BOUNDARY_PENALTY", "Cost of a boundary", "", 2, 30, 0.5, "song"),
@@ -119,6 +121,11 @@ class WebApp:
             "song_time": self.controller.song_time(),
             "mode": self.controller.mode,
             "rules": self.controller.rules,
+            "character": {
+                "drive": round(self.controller.drive, 2),
+                "calm": self.controller.calm,
+                "override": self.controller.character_overrides.get(self.controller.current_track_id, "auto"),
+            },
             "drop_lead": self.controller.drop_lead,
             "drop_hit": self.controller.drop_hit,
             "lights": self._lights(),
@@ -141,6 +148,8 @@ class WebApp:
             logger.info("Rule {} switched {} from the web app", command["name"], "on" if command["on"] else "off")
             if command["name"] in ANALYSIS_RULES and self.controller.analysis is not None:
                 self.controller.reanalyse()
+        elif kind == "character":
+            self.controller.set_character_override(command["value"])
         elif kind == "drop_effect":
             effects = {"lead": DROP_LEADS, "hit": DROP_HITS}[command["stage"]]
             if command["name"] not in effects:

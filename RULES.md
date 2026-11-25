@@ -89,6 +89,25 @@ bar. Then the lead-in sits at the start, like a 4-bar build before three
 8-bar phrases. A phrase is the unit for
 energy, pulse profile and colour.
 
+### Song character — toggle `calm_style` (`sections.py`)
+Before this rule every genre swung the same: measured on 99 tracks, the light
+moved about 0.28 of its range on every beat in ambient, jazz and bossa nova as
+much as in house, because energy is ranked inside each song. So each song gets
+a **drive** score, 0 calm to 1 driving, from three things Spotify measures for
+the whole track: its loudness, the median beat confidence and the median
+timbre brightness (a logistic fit, `DRIVE_*`, on 67 tracks labelled by ear,
+90% right when each is left out of the fit).
+- Under `CALM_DRIVE` (0.5) the song plays **calm style**: each bar breathes
+  once on its first beat instead of pulsing on every beat, its strength set
+  by the bar's loudness rank in the track; phrase energies are scaled by
+  `CALM_ENERGY_SCALE` (0.6), so the bands stay gentler; colour crossings take
+  `CALM_HUE_FADE_BARS` (2); there are no drop effects. On the tracks
+  labelled calm the swing per beat halves (0.27 → 0.13) and the commands sent
+  halve; driving tracks are unchanged.
+- The web app's Song character picker forces a song calm or driving; the
+  choice is kept per track in `track_overrides.json` and re-runs the song's
+  analysis. Busy bebop (Seatbelts) is what the score gets wrong.
+
 ## 2. Brightness (`atmospheric.py`)
 
 ### Perceptual levels
@@ -149,7 +168,8 @@ one:
 - a **drop part** (above): the bar before it is the lead-in, its first bar the
   hit. When a drop part starts on a break, the break wins.
 
-A hit on a quiet or flow bar is no hit. A bar that is already a hit isn't
+A hit on a quiet or flow bar is no hit, and a song in calm style plays no
+drop effects. A bar that is already a hit isn't
 also a lead-in (back-to-back drops). The lead-in and hit effects own their
 bars over the flow and quiet modes; a silence still dims the beats inside
 it.
