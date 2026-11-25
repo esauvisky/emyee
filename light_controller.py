@@ -146,6 +146,17 @@ OVERRIDES_FILE = "track_overrides.json"
 # Phrase lengths double until a phrase lasts at least PHRASE_MIN_S, so fast or
 # 3/4 tracks (bars of about a second) don't change colour every few seconds.
 PHRASE_MIN_S = 7.0
+# Colour identity: parts whose mean sound (bar_features: loudness, timbre,
+# chords) sits within IDENTITY_DISTANCE of an earlier group join it and share
+# its home colour, so a returning chorus comes back in its colour. Measured on
+# 99 tracks, 2.0 gives a median of 8 colours a song with 43% of parts
+# returning to an earlier one; adjacent parts sit 3.05 apart (median). The
+# first home colour comes from the song's key (circle of fifths round the
+# wheel); each new group takes the palette colour farthest from the groups
+# before. A phrase whose home colour is the colour already showing takes the
+# home colour's palette neighbour, so every phrase still changes colour.
+IDENTITY_DISTANCE = 2.0
+IDENTITY_NEIGHBOUR_STEP = 40
 # One log file per played track, down to DEBUG. The per-lamp command lines
 # are TRACE and stay out of it.
 SONG_LOG_DIR = "logs"
@@ -163,6 +174,7 @@ ANALYSIS_RULES = {'downbeat_fix', 'calm_style'}
 RULES = {
     'downbeat_fix': "Bars follow a steady beat grid when Spotify's slip, with beat 1 where the music's changes land",
     'colour_changes': "Each phrase crosses into a new palette colour over its last bar",
+    'colour_identity': "Parts that sound alike share a home colour, so a returning chorus comes back in its colour",
     'calm_style': "Calm songs breathe once per bar, gentler, with slower colour changes and no drop effects",
     'flow': "Bars without transients drift slowly instead of pulsing",
     'flow_hue_drift': "Flow bars step the hue one palette colour up the wheel per bar",
@@ -235,6 +247,7 @@ class LightsController:
         self.disabled_devices: set[str] = set()  # IPs switched off from the web app: sent nothing
         self.drive: float = 0.0                  # how driving the loaded track is (0–1)
         self.calm: bool = False                  # the loaded track plays in calm style
+        self._phrase_colours: list[tuple[int, int]] = []   # colour identity: (hue, sat) per phrase
         # No overrides file until the first song is forced calm or driving.
         self.character_overrides: dict[str, str] = (
             json.load(open(OVERRIDES_FILE)) if os.path.exists(OVERRIDES_FILE) else {}
@@ -348,10 +361,11 @@ class LightsController:
             "closer to the track's loudest sound than the bars before it"
         )
         # Too few bars to split (as in detect_sections): no phrase grid to choose.
-        self._texture_steps = (
-            texture_steps(bar_features(self.analysis, self.bars)) if len(self.bars) >= 2 * MIN_PART_BARS
-            else np.zeros(len(self.bars))
+        self._bar_features = (
+            bar_features(self.analysis, self.bars) if len(self.bars) >= 2 * MIN_PART_BARS
+            else np.zeros((len(self.bars), 25))
         )
+        self._texture_steps = texture_steps(self._bar_features)
         self.sections = self._split_phrases()
         bar_starts = [bar['start'] for bar in self.bars]
         self._section_bar_starts = []
@@ -394,6 +408,7 @@ class LightsController:
         )
 
         self._compute_section_energies()
+        self._compute_phrase_colours()
         self._compute_section_timbres()
         self._compute_quiet_bars()
         self._compute_silences()
@@ -480,6 +495,52 @@ class LightsController:
             json.dump(self.character_overrides, f, indent=1)
         logger.info("Character for {} set to {} from the web app", self.current_song, character)
         self.reanalyse()
+
+    def _compute_phrase_colours(self):
+        """Colour identity: a home colour per group of alike-sounding parts,
+        and each phrase's colour from its part's home (IDENTITY_DISTANCE)."""
+        bar_starts = [bar['start'] for bar in self.bars]
+        part_bars = [bisect.bisect_left(bar_starts, part['start']) for part in self._parts] + [len(self.bars)]
+        key = self.analysis['track']['key']
+        # Circle of fifths round the wheel; Spotify reports -1 when it found no key.
+        key_hue = (key * 7 % 12) * 30 if key >= 0 else 0
+        palette = VIBRANT_COLOR_PALETTE
+
+        def distance(a: int, b: int) -> int:
+            return abs((a - b + 180) % 360 - 180)
+
+        groups: list[tuple[np.ndarray, int, tuple[int, int]]] = []   # (summed sound, parts, home colour)
+        homes = []
+        for first, end in zip(part_bars, part_bars[1:]):
+            # A part past the analysed bars (no bars) has no sound to compare.
+            sound = self._bar_features[first:end].mean(axis=0) if end > first else np.zeros(self._bar_features.shape[1])
+            gaps = [np.linalg.norm(sound - total / count) for total, count, _ in groups]
+            if gaps and min(gaps) < IDENTITY_DISTANCE:
+                index = int(np.argmin(gaps))
+                total, count, home = groups[index]
+                groups[index] = (total + sound, count + 1, home)
+            else:
+                if not groups:
+                    home = min(palette, key=lambda colour: distance(colour[0], key_hue))
+                else:
+                    home = max(palette, key=lambda colour: min(distance(colour[0], g[2][0]) for g in groups))
+                groups.append((sound, 1, home))
+            homes.append(home)
+        self._phrase_colours = []
+        showing = None
+        for section in self.sections:
+            home = homes[bisect.bisect_right([part['start'] for part in self._parts], section['start']) - 1]
+            colour = home
+            if showing == home:
+                colour = min(palette, key=lambda c: distance(c[0], (home[0] + IDENTITY_NEIGHBOUR_STEP) % 360) + 1000 * (c == home))
+            self._phrase_colours.append(colour)
+            showing = colour
+        logger.debug(
+            "Colour identity: {} parts in {} groups of alike sound (under {} apart); first home colour {} from key {} "
+            "(circle of fifths); part homes: {}",
+            len(self._parts), len(groups), IDENTITY_DISTANCE, homes[0][0] if homes else '-', key,
+            ' '.join(str(home[0]) for home in homes),
+        )
 
     def _fix_bar_grid(self):
         """Lay the bars on the grid the music's changes gather on (Spotify's
@@ -1424,7 +1485,10 @@ class LightsController:
         Only the crossing is set up here; the pulses scheduled over it send
         the colour it has reached as they land.
         """
-        hue, saturation = self._section_hue_sat(self.sections[section_idx])
+        hue, saturation = (
+            self._phrase_colours[section_idx] if self.rules['colour_identity']
+            else self._section_hue_sat(self.sections[section_idx])
+        )
         start_mono = time.monotonic() + (start - current_time)
         start_hue, start_sat = self._color_at(start_mono)
         self._color_trans_start_hue = float(start_hue)
@@ -1435,9 +1499,10 @@ class LightsController:
         self._current_params['saturation'] = saturation
         self._pre_section_trans_for = section_idx
         logger.debug(
-            "Colour {}/{} → {}/{} over {:.2f}s, landing on phrase {}'s first beat "
-            "(a palette colour 40–{} degrees away, so the crossing reads as a change without sweeping the wheel)",
-            start_hue, start_sat, hue, saturation, end - start, section_idx, MAX_HUE_STEP,
+            "Colour {}/{} → {}/{} over {:.2f}s, landing on phrase {}'s first beat ({})",
+            start_hue, start_sat, hue, saturation, end - start, section_idx,
+            "its part's home colour" if self.rules['colour_identity']
+            else f"a palette colour 40–{MAX_HUE_STEP} degrees away, so the crossing reads as a change without sweeping the wheel",
         )
 
     def _reset_for_seek(self, expected: float, current_time: float):

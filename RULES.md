@@ -264,11 +264,28 @@ Everything else pulses on every beat.
 ## 4. Colour
 
 ### Phrase colour changes — toggle `colour_changes`
-Every phrase gets a new palette colour 40–`MAX_HUE_STEP` (90°) from the
-current one, so it reads as a change without sweeping through unrelated
-colours. The hue crosses linearly over the last `HUE_FADE_BARS` (1) bar
+Every phrase crosses into a new colour. Which colour comes from colour
+identity (below); with that off, a random palette colour 40–`MAX_HUE_STEP`
+(90°) from the current one, so it reads as a change without sweeping through
+unrelated colours. The hue crosses linearly over the last `HUE_FADE_BARS` (1) bar
 before the phrase, landing on its first beat, while beats keep pulsing: each
 command carries the colour the crossing has reached when it lands.
+
+### Colour identity — toggle `colour_identity`
+Parts that sound alike share a home colour, so a returning chorus or drop
+comes back in its colour. Each part's mean sound (loudness, timbre and
+chords, as the part split measures them) joins the first earlier group within
+`IDENTITY_DISTANCE` (2.0) of it, or starts a new group. Over 99 tracks this
+gives a median of 8 colours a song, with 43% of parts returning to an earlier
+group; adjacent parts sit 3.05 apart (median), so they rarely merge.
+- The first group's colour is the palette colour nearest the song's key on
+  the circle of fifths round the wheel (C at 0°, G at 30°, D at 60°…), so a
+  song always opens in the same colour. Each new group takes the palette
+  colour farthest from the groups before it.
+- Each phrase takes its part's home colour, unless that is the colour already
+  showing (a part of the same group just before, or the phrase before in a
+  long part): then the palette colour nearest `IDENTITY_NEIGHBOUR_STEP` (40°)
+  up from home. Every phrase still changes colour.
 
 ### Short phrases
 A phrase shorter than `MIN_COLOR_SECTION_BARS` (4) gets no colour of its

@@ -45,6 +45,7 @@ SETTINGS = [
     ("Flow", light_controller, "FLOW_QUIET_DB", "Under the loud bars", "dB", 0, 30, 0.5, "song"),
     ("Character", light_controller, "CALM_DRIVE", "Calm style under drive", "", 0, 1, 0.05, "song"),
     ("Character", light_controller, "CALM_ENERGY_SCALE", "Calm energy scale", "×", 0.2, 1, 0.05, "song"),
+    ("Colour", light_controller, "IDENTITY_DISTANCE", "Parts share a colour within", "", 0, 6, 0.1, "song"),
     ("Colour", light_controller, "PHRASE_MIN_S", "Shortest phrase", "s", 0, 20, 0.5, "song"),
     ("Bars", sections, "BACKBEAT_MIN_T", "Backbeat decides when t is over", "", 2, 20, 0.5, "song"),
     ("Bars", sections, "DOWNBEAT_MIN_SHARE", "Move beat 1 when a beat gets", "share", 0.25, 0.8, 0.01, "song"),
